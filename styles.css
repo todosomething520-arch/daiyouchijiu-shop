@@ -336,7 +336,7 @@ a { color: var(--gold); text-decoration: none; }
 
 .plan-card.featured { border-color: var(--gold); box-shadow: 0 0 0 1px rgba(232, 200, 114, 0.25), var(--shadow); }
 .plan-card.in-cart { border-color: var(--gold); box-shadow: 0 0 24px rgba(232, 200, 114, 0.25); background: rgba(232, 200, 114, 0.08); }
-.plan-card.free-ship { grid-column: 1 / -1; border-color: var(--gold); }
+.plan-card.bulk-card { grid-column: 1 / -1; border-color: var(--gold); }
 
 .plan-badge {
   position: absolute;
@@ -369,12 +369,23 @@ a { color: var(--gold); text-decoration: none; }
 .plan-add { margin-top: 0.7rem; display: grid; gap: 0.5rem; justify-items: center; }
 .plan-card .qty-control { justify-content: center; }
 .plan-card .btn { width: 100%; margin-top: 0; padding: 0.65rem 0.7rem; font-size: 0.88rem; }
-.plan-card.free-ship .plan-add {
-  grid-template-columns: auto minmax(0, 16rem);
-  justify-content: center;
-  align-items: center;
-  gap: 0.7rem;
+.plan-card.bulk-card .plan-add {
+  width: 100%;
+  max-width: 22rem;
+  margin: 0 auto;
 }
+.plan-hint {
+  color: var(--gold-3);
+  font-weight: 700;
+  margin-top: 0.2rem;
+}
+.bulk-preview {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+.plan-card.bulk-card .qty-control input { width: 3.6rem; }
 .in-cart-note {
   margin: 0.4rem 0 0;
   font-size: 0.78rem;
@@ -716,12 +727,11 @@ body.success-open #site-root { visibility: hidden; pointer-events: none; }
   .card-grid.two, .card-grid.three, .steps { grid-template-columns: repeat(3, 1fr); }
   .card-grid.two, .highlight-grid { grid-template-columns: 1fr 1fr; }
   .four-points { grid-template-columns: 1fr 1fr; }
-  .pricing-grid { grid-template-columns: repeat(5, 1fr); gap: 0.75rem; }
-  .plan-card.free-ship { grid-column: auto; }
-  .plan-card.free-ship .plan-add { grid-template-columns: 1fr; }
-  .plan-card { padding: 1.15rem 0.5rem 0.95rem; }
-  .plan-price .amount { font-size: 1.45rem; }
-  .plan-card h3 { font-size: 1.02rem; }
+  .pricing-grid { grid-template-columns: repeat(4, 1fr); gap: 0.85rem; }
+  .plan-card.bulk-card { grid-column: auto; }
+  .plan-card { padding: 1.15rem 0.55rem 0.95rem; }
+  .plan-price .amount { font-size: 1.5rem; }
+  .plan-card h3 { font-size: 1.05rem; }
 
   .checkout-box { padding: 2rem 2rem 1.7rem; }
   .bottom-bar { display: none; }

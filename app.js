@@ -15,12 +15,20 @@ const PLANS = [
   { id: "p1", name: "1錠體驗", tablets: 1, price: 250, desc: "嘗鮮入門", unit: 250 },
   { id: "p3", name: "3錠組", tablets: 3, price: 700, desc: "輕量補充", unit: 233, save: 50 },
   { id: "p5", name: "5錠組", tablets: 5, price: 1100, desc: "熱銷推薦", unit: 220, save: 150, popular: true },
-  { id: "p10", name: "10錠組", tablets: 10, price: 2000, desc: "最划算", unit: 200, save: 500, featured: true },
-  { id: "p15", name: "15錠組", tablets: 15, price: 3000, desc: "一次買滿即免運", unit: 200, save: 750, freeShip: true, badge: "免運優惠" },
+  {
+    id: "pbulk",
+    name: "批量優惠",
+    lineName: "批量",
+    bulk: true,
+    unit: 200,
+    desc: "最低 10 錠起",
+    hint: "15 錠 NT$3,000 免運",
+    badge: "批量優惠",
+    featured: true,
+    qtyMin: 10,
+    qtyMax: 100,
+  },
 ];
-
-const QTY_MIN = 1;
-const QTY_MAX = 20;
 
 const state = {
   cart: {}, // planId -> qty
@@ -40,26 +48,62 @@ function planById(id) {
   return PLANS.find((p) => p.id === id) || null;
 }
 
+function isBulk(plan) {
+  return !!(plan && plan.bulk);
+}
+
+function qtyLimits(plan) {
+  if (isBulk(plan)) return { min: plan.qtyMin, max: plan.qtyMax };
+  return { min: 1, max: 20 };
+}
+
+function defaultQty(plan) {
+  return qtyLimits(plan).min;
+}
+
+function clampQtyFor(plan, n) {
+  const { min, max } = qtyLimits(plan);
+  const q = Math.floor(Number(n));
+  if (!Number.isFinite(q)) return min;
+  return Math.min(max, Math.max(min, q));
+}
+
+function buildLine(p, qty) {
+  if (isBulk(p)) {
+    return {
+      planId: p.id,
+      planName: p.lineName,
+      bulk: true,
+      tabletsEach: 1,
+      quantity: qty,
+      tabletTotal: qty,
+      unitPrice: p.unit,
+      subtotal: p.unit * qty,
+    };
+  }
+  return {
+    planId: p.id,
+    planName: p.name,
+    bulk: false,
+    tabletsEach: p.tablets,
+    quantity: qty,
+    tabletTotal: p.tablets * qty,
+    unitPrice: p.price,
+    subtotal: p.price * qty,
+  };
+}
+
+function lineLabel(it) {
+  if (it.bulk) return `批量 × ${it.tabletTotal} 錠`;
+  return `${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）`;
+}
+
 function cartItems() {
   return PLANS.map((p) => {
     const qty = state.cart[p.id] || 0;
     if (qty < 1) return null;
-    return {
-      planId: p.id,
-      planName: p.name,
-      tabletsEach: p.tablets,
-      quantity: qty,
-      tabletTotal: p.tablets * qty,
-      unitPrice: p.price,
-      subtotal: p.price * qty,
-    };
+    return buildLine(p, qty);
   }).filter(Boolean);
-}
-
-function clampQty(n) {
-  const q = Math.floor(Number(n));
-  if (!Number.isFinite(q)) return QTY_MIN;
-  return Math.min(QTY_MAX, Math.max(QTY_MIN, q));
 }
 
 function totals() {
@@ -92,25 +136,37 @@ function renderPlans() {
   grid.innerHTML = PLANS.map((p) => {
     const badgeText = p.badge || (p.featured ? "最划算" : p.popular ? "熱銷推薦" : "");
     const badge = badgeText ? `<div class="plan-badge">${badgeText}</div>` : "";
-    const save = p.save ? `<div>省下 ${money(p.save)}</div>` : "<div>單錠原價</div>";
-    const btnClass = p.featured || p.popular || p.freeShip ? "btn-primary" : "btn-ghost";
-    const extras = [p.featured ? "featured" : "", p.freeShip ? "free-ship" : ""].filter(Boolean).join(" ");
+    const btnClass = p.featured || p.popular || p.bulk ? "btn-primary" : "btn-ghost";
+    const extras = [p.featured ? "featured" : "", p.bulk ? "bulk-card" : ""].filter(Boolean).join(" ");
+    const limits = qtyLimits(p);
+    const start = defaultQty(p);
+    const unitWord = p.bulk ? "錠數" : "組數";
+    let priceBlock;
+    let meta;
+    let preview = "";
+    if (p.bulk) {
+      priceBlock = `<div class="plan-price"><span class="currency">每錠 NT$</span> <span class="amount">${p.unit.toLocaleString("zh-TW")}</span></div>`;
+      meta = `<div class="plan-meta"><div>${p.desc}</div><div class="plan-hint">${p.hint}</div></div>`;
+      preview = `<p class="bulk-preview" data-bulk-preview>${start} 錠 ${money(p.unit * start)}</p>`;
+    } else {
+      const save = p.save ? `<div>省下 ${money(p.save)}</div>` : "<div>單錠原價</div>";
+      priceBlock = `<div class="plan-price"><span class="currency">NT$</span> <span class="amount">${p.price.toLocaleString("zh-TW")}</span></div>`;
+      meta = `<div class="plan-meta"><div>${p.tablets} 錠（每錠約 ${money(p.unit)}）</div>${save}</div>`;
+    }
     return `
       <article class="plan-card ${extras}" data-plan="${p.id}">
         ${badge}
         <h3>${p.name}</h3>
-        <p class="plan-desc">${p.desc}</p>
-        <div class="plan-price"><span class="currency">NT$</span> <span class="amount">${p.price.toLocaleString("zh-TW")}</span></div>
-        <div class="plan-meta">
-          <div>${p.tablets} 錠（每錠約 ${money(p.unit)}）</div>
-          ${save}
-        </div>
+        ${p.bulk ? "" : `<p class="plan-desc">${p.desc}</p>`}
+        ${priceBlock}
+        ${meta}
         <div class="plan-add">
           <div class="qty-control">
-            <button type="button" data-add-delta="-1" aria-label="減少 ${p.name} 組數">−</button>
-            <input type="number" class="plan-qty-input" min="1" max="20" value="1" inputmode="numeric" aria-label="${p.name} 加入組數">
-            <button type="button" data-add-delta="1" aria-label="增加 ${p.name} 組數">+</button>
+            <button type="button" data-add-delta="-1" aria-label="減少 ${p.name} ${unitWord}">−</button>
+            <input type="number" class="plan-qty-input" min="${limits.min}" max="${limits.max}" value="${start}" inputmode="numeric" aria-label="${p.name} ${unitWord}">
+            <button type="button" data-add-delta="1" aria-label="增加 ${p.name} ${unitWord}">+</button>
           </div>
+          ${preview}
           <button type="button" class="btn ${btnClass} add-to-cart">加入購物車</button>
         </div>
         <p class="in-cart-note" data-in-cart-note hidden></p>
@@ -119,39 +175,57 @@ function renderPlans() {
 }
 
 function readCardQty(card) {
+  const plan = planById(card.dataset.plan);
   const input = card.querySelector(".plan-qty-input");
-  return clampQty(input ? input.value : 1);
+  return clampQtyFor(plan, input ? input.value : defaultQty(plan));
+}
+
+function updateBulkPreview(card, qty) {
+  const preview = card.querySelector("[data-bulk-preview]");
+  const plan = planById(card.dataset.plan);
+  if (!preview || !isBulk(plan)) return;
+  const n = clampQtyFor(plan, qty);
+  preview.textContent = `${n} 錠 ${money(plan.unit * n)}`;
 }
 
 function writeCardQty(card, qty) {
+  const plan = planById(card.dataset.plan);
+  const n = clampQtyFor(plan, qty);
   const input = card.querySelector(".plan-qty-input");
-  if (input && document.activeElement !== input) input.value = String(qty);
+  if (input && document.activeElement !== input) input.value = String(n);
+  updateBulkPreview(card, n);
+  return n;
 }
 
 function addToCart(planId, qty) {
   const plan = planById(planId);
   if (!plan) return;
-  const add = clampQty(qty);
+  const add = clampQtyFor(plan, qty);
+  const { max } = qtyLimits(plan);
   const current = state.cart[planId] || 0;
-  if (current >= QTY_MAX) {
-    showToast(`${plan.name} 最多可買 ${QTY_MAX} 組`);
+  const unit = isBulk(plan) ? "錠" : "組";
+  if (current >= max) {
+    showToast(`${isBulk(plan) ? "批量" : plan.name} 最多可買 ${max} ${unit}`);
     return;
   }
-  const next = Math.min(QTY_MAX, current + add);
+  const next = Math.min(max, current + add);
   state.cart[planId] = next;
   updateTotals();
   const card = document.querySelector(`.plan-card[data-plan="${planId}"]`);
-  if (card) writeCardQty(card, 1);
+  if (card) writeCardQty(card, defaultQty(plan));
   if (next < current + add) {
-    showToast(`${plan.name} 已達 ${QTY_MAX} 組上限`);
+    showToast(`${isBulk(plan) ? "批量" : plan.name} 已達 ${max} ${unit}上限`);
+  } else if (isBulk(plan)) {
+    showToast(`已加入購物車：批量 × ${add} 錠`);
   } else {
     showToast(`已加入購物車：${plan.name} × ${add} 組`);
   }
 }
 
 function setLineQty(planId, qty) {
-  if (!planById(planId) || !state.cart[planId]) return;
-  state.cart[planId] = clampQty(qty);
+  const plan = planById(planId);
+  if (!plan || !state.cart[planId]) return;
+  state.cart[planId] = clampQtyFor(plan, qty);
   updateTotals();
 }
 
@@ -168,7 +242,7 @@ function setupCartEvents() {
     const planId = card.dataset.plan;
     if (e.target.closest("[data-add-delta]")) {
       const delta = Number(e.target.closest("[data-add-delta]").dataset.addDelta);
-      writeCardQty(card, clampQty(readCardQty(card) + delta));
+      writeCardQty(card, readCardQty(card) + delta);
       return;
     }
     if (e.target.closest(".add-to-cart")) {
@@ -179,7 +253,14 @@ function setupCartEvents() {
     const input = e.target.closest(".plan-qty-input");
     if (!input) return;
     const card = input.closest(".plan-card");
-    writeCardQty(card, clampQty(input.value));
+    writeCardQty(card, input.value);
+  });
+  grid.addEventListener("input", (e) => {
+    const input = e.target.closest(".plan-qty-input");
+    if (!input) return;
+    const card = input.closest(".plan-card");
+    const plan = planById(card.dataset.plan);
+    if (isBulk(plan)) updateBulkPreview(card, input.value);
   });
 
   $("#cart-lines").addEventListener("click", (e) => {
@@ -214,21 +295,25 @@ function renderCartLines(items) {
   empty.hidden = true;
   box.innerHTML = items
     .map((it) => {
+      const plan = planById(it.planId);
+      const limits = qtyLimits(plan);
+      const unitWord = it.bulk ? "錠數" : "組數";
+      const title = it.bulk ? "批量優惠" : it.planName;
       return `<div class="cart-line" data-plan="${it.planId}">
         <div class="cart-line-main">
           <div class="cart-line-info">
-            <strong>${it.planName}</strong>
-            <span>${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）</span>
+            <strong>${title}</strong>
+            <span>${lineLabel(it)}</span>
           </div>
           <span class="cart-line-sub">${money(it.subtotal)}</span>
         </div>
         <div class="cart-line-actions">
           <div class="qty-control">
-            <button type="button" data-cart-delta="-1" aria-label="減少 ${it.planName} 組數">−</button>
-            <input type="number" min="1" max="20" value="${it.quantity}" inputmode="numeric" data-cart-qty="${it.planId}" aria-label="${it.planName} 組數">
-            <button type="button" data-cart-delta="1" aria-label="增加 ${it.planName} 組數">+</button>
+            <button type="button" data-cart-delta="-1" aria-label="減少 ${title} ${unitWord}">−</button>
+            <input type="number" min="${limits.min}" max="${limits.max}" value="${it.quantity}" inputmode="numeric" data-cart-qty="${it.planId}" aria-label="${title} ${unitWord}">
+            <button type="button" data-cart-delta="1" aria-label="增加 ${title} ${unitWord}">+</button>
           </div>
-          <button type="button" class="btn-remove" data-cart-remove="${it.planId}" aria-label="移除 ${it.planName}">移除</button>
+          <button type="button" class="btn-remove" data-cart-remove="${it.planId}" aria-label="移除 ${title}">移除</button>
         </div>
       </div>`;
     })
@@ -237,7 +322,7 @@ function renderCartLines(items) {
 
 function cartSummaryHtml(t) {
   const itemRows = t.items
-    .map((it) => `<div><span>${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）</span><span>${money(it.subtotal)}</span></div>`)
+    .map((it) => `<div><span>${lineLabel(it)}</span><span>${money(it.subtotal)}</span></div>`)
     .join("");
   return `<div class="live-lines">
       ${itemRows}
@@ -279,7 +364,8 @@ function updateTotals() {
     const note = card.querySelector("[data-in-cart-note]");
     if (note) {
       note.hidden = qty < 1;
-      note.textContent = qty > 0 ? `已在購物車 × ${qty} 組` : "";
+      const plan = planById(id);
+      note.textContent = qty > 0 ? `已在購物車 × ${qty} ${isBulk(plan) ? "錠" : "組"}` : "";
     }
   });
 
@@ -287,7 +373,7 @@ function updateTotals() {
   if (t.items.length) {
     display.classList.add("filled");
     display.innerHTML = t.items
-      .map((it) => `${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）`)
+      .map((it) => lineLabel(it))
       .join("<br>") + `<br>小計 ${money(t.subtotal)}　運費 ${t.shipping ? money(t.shipping) : "免運"}　合計 ${money(t.total)}`;
   } else {
     display.classList.remove("filled");
@@ -378,10 +464,11 @@ function buildOrder() {
 
 function orderSummaryHtml(order, { thankYou = false } = {}) {
   const c = order.customer;
-  const itemRows = (order.items || []).map((it) => [
-    it.planName,
-    `× ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`,
-  ]);
+  const itemRows = (order.items || []).map((it) =>
+    it.bulk
+      ? ["批量", `× ${it.tabletTotal} 錠　${money(it.subtotal)}`]
+      : [it.planName, `× ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`]
+  );
   const rows = [
     ["訂單編號", order.orderId],
     ["商品", order.product],
@@ -410,8 +497,10 @@ function orderSummaryHtml(order, { thankYou = false } = {}) {
 
 function formatOrderText(order) {
   const c = order.customer;
-  const lines = (order.items || []).map(
-    (it) => `・${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`
+  const lines = (order.items || []).map((it) =>
+    it.bulk
+      ? `・批量 × ${it.tabletTotal} 錠　${money(it.subtotal)}`
+      : `・${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`
   );
   return [
     `訂單編號：${order.orderId}`,
@@ -690,8 +779,8 @@ function init() {
     state.lastOrder = null;
     $$(".plan-card").forEach((c) => {
       c.classList.remove("in-cart");
-      const input = c.querySelector(".plan-qty-input");
-      if (input) input.value = "1";
+      const plan = planById(c.dataset.plan);
+      writeCardQty(c, defaultQty(plan));
     });
     updateTotals();
     setupStickyBar();

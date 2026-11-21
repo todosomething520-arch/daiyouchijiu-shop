@@ -30,11 +30,10 @@ const PLANS = Object.freeze({
   p1: { id: "p1", name: "1錠體驗", tablets: 1, price: 250 },
   p3: { id: "p3", name: "3錠組", tablets: 3, price: 700 },
   p5: { id: "p5", name: "5錠組", tablets: 5, price: 1100 },
-  p10: { id: "p10", name: "10錠組", tablets: 10, price: 2000 },
-  p15: { id: "p15", name: "15錠組", tablets: 15, price: 3000 },
+  pbulk: { id: "pbulk", name: "批量優惠", lineName: "批量", bulk: true, unitPrice: 200, qtyMin: 10, qtyMax: 100 },
 });
 
-const PLAN_ORDER = Object.freeze(["p1", "p3", "p5", "p10", "p15"]);
+const PLAN_ORDER = Object.freeze(["p1", "p3", "p5", "pbulk"]);
 
 const LIMITS = {
   name: [2, 40],
@@ -44,6 +43,41 @@ const LIMITS = {
   qty: [1, 20],
   maxLines: 5,
 };
+
+function qtyBounds(plan) {
+  if (plan && plan.bulk) return [plan.qtyMin, plan.qtyMax];
+  return LIMITS.qty;
+}
+
+function formatItemLine(it) {
+  if (it.bulk) return `・批量 × ${it.tabletTotal} 錠　${money(it.subtotal)}`;
+  return `・${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`;
+}
+
+function buildLine(plan, quantity) {
+  if (plan.bulk) {
+    return {
+      planId: plan.id,
+      planName: plan.lineName,
+      bulk: true,
+      tabletsEach: 1,
+      quantity,
+      tabletTotal: quantity,
+      unitPrice: plan.unitPrice,
+      subtotal: plan.unitPrice * quantity,
+    };
+  }
+  return {
+    planId: plan.id,
+    planName: plan.name,
+    bulk: false,
+    tabletsEach: plan.tablets,
+    quantity,
+    tabletTotal: plan.tablets * quantity,
+    unitPrice: plan.price,
+    subtotal: plan.price * quantity,
+  };
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -110,9 +144,7 @@ function generateOrderNo() {
 
 function formatOrderText(order) {
   const c = order.customer;
-  const lines = (order.items || []).map(
-    (it) => `・${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`
-  );
+  const lines = (order.items || []).map(formatItemLine);
   return [
     `訂單編號：${order.orderNo}`,
     `商品：${order.product}`,
@@ -149,12 +181,14 @@ function parseItems(body) {
     const plan = PLANS[planId];
     if (!plan) return { error: "invalid_plan" };
     const qty = Number(row.qty != null ? row.qty : row.quantity);
-    if (!Number.isInteger(qty) || qty < LIMITS.qty[0] || qty > LIMITS.qty[1]) {
+    const [qMin, qMax] = qtyBounds(plan);
+    if (!Number.isInteger(qty) || qty < qMin || qty > qMax) {
       return { error: "invalid_quantity" };
     }
     const prev = merged.get(planId) || 0;
     const next = prev + qty;
-    if (next > LIMITS.qty[1]) return { error: "invalid_quantity" };
+    if (next > qMax) return { error: "invalid_quantity" };
+    if (plan.bulk && next < qMin) return { error: "invalid_quantity" };
     merged.set(planId, next);
   }
 
@@ -162,19 +196,7 @@ function parseItems(body) {
     return { error: "invalid_items" };
   }
 
-  const items = PLAN_ORDER.filter((id) => merged.has(id)).map((id) => {
-    const plan = PLANS[id];
-    const quantity = merged.get(id);
-    return {
-      planId: plan.id,
-      planName: plan.name,
-      tabletsEach: plan.tablets,
-      quantity,
-      tabletTotal: plan.tablets * quantity,
-      unitPrice: plan.price,
-      subtotal: plan.price * quantity,
-    };
-  });
+  const items = PLAN_ORDER.filter((id) => merged.has(id)).map((id) => buildLine(PLANS[id], merged.get(id)));
   return { items };
 }
 
@@ -444,6 +466,7 @@ module.exports = {
   validateAndBuild,
   formatOrderText,
   parseItems,
+  formatItemLine,
   PLANS,
   SHIPPING_FEE,
   FREE_SHIPPING_AT,
