@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: daiyouchijiu-shop
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: HOST
+        value: "0.0.0.0"
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_USER_ID
+        sync: false

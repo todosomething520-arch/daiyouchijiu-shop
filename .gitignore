@@ -1,0 +1,11 @@
+.env
+.env.*
+*.pem
+*.key
+node_modules/
+screenshots/
+logs/
+*.jsonl
+onepage-shop-secrets/
+onepage-shop-data/
+onepage-shop-runtime/

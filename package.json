@@ -1,0 +1,12 @@
+{
+  "name": "onepage-shop",
+  "private": true,
+  "description": "大又持久錠一頁式下單（靜態頁 + POST /api/order）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
