@@ -16,6 +16,9 @@ const PROMO_TEXT = "首購即送 NT$250 折抵券：下次購買附上使用心�
 const LINE_OA_URL = "https://line.me/R/ti/p/@997baoaw"; // 官方帳號加好友連結
 const LINE_OA_ID = "@997baoaw"; // 官方帳號 ID（可搜尋）
 const ORDER_API = "/api/order";
+const REFERRAL_CHECK_API = "/api/referral/check";
+const REFERRAL_CODE_RE = /^[A-HJ-NP-Z2-9]{6}$/; // 6 碼，不含 0 O 1 I
+const REBATE_NOTE = "回饋金僅可作為購物金，不可兌換現金，請洽 LINE 客服折抵。";
 
 const PLANS = [
   { id: "p1", name: "1錠體驗", tablets: 1, price: 250, desc: "嘗鮮入門", unit: 250 },
@@ -40,6 +43,7 @@ const state = {
   cart: {}, // planId -> qty
   pendingOrder: null,
   lastOrder: null,
+  referralLookup: null, // { key, result }，結帳頁預估用；以送出後伺服器結果為準
 };
 
 /* ========== 工具 ========== */
@@ -135,8 +139,37 @@ function readCouponForm() {
   return { code: code, feedback: feedback, publishConsent: publishConsent, wants: wants };
 }
 
+function discountChoice() {
+  const el = document.querySelector('input[name="discountChoice"]:checked');
+  return el && el.value === "coupon" ? "coupon" : "referral";
+}
+
+function normalizeReferralCode(raw) {
+  return String(raw || "").replace(/[\s-]/g, "").toUpperCase();
+}
+
+function readReferralCode() {
+  const el = $("#referral-code");
+  return normalizeReferralCode(el ? el.value : "");
+}
+
+// 預估是否可享推薦 9 折（真正結果由伺服器／試算表決定）
+function referralEstimate(phone, code) {
+  const look = state.referralLookup;
+  const key = phone + "|" + code;
+  const result = look && look.key === key ? look.result : null;
+  const codeOk = REFERRAL_CODE_RE.test(code);
+  if (result && result.available) {
+    return { applies: !!result.applies, confirmed: true, result: result };
+  }
+  if (result && !result.available) {
+    return { applies: codeOk, confirmed: false, unavailable: true, result: result };
+  }
+  return { applies: codeOk, confirmed: false, result: null };
+}
+
 function couponReady(form, allowed) {
-  if (!allowed || !form.wants) return false;
+  if (!allowed || !form.wants || discountChoice() !== "coupon") return false;
   return isCouponCode(form.code) && form.feedback.length >= COUPON_FEEDBACK_MIN && form.feedback.length <= COUPON_FEEDBACK_MAX;
 }
 
@@ -148,13 +181,23 @@ function totals() {
   const allowed = couponAllowed(subtotal);
   const form = readCouponForm();
   const applied = couponReady(form, allowed);
-  const discount = applied ? COUPON_DISCOUNT : 0;
+  const couponDiscount = applied ? COUPON_DISCOUNT : 0;
+  const phone = normalizePhone($("#phone") ? $("#phone").value : "");
+  const referralCode = readReferralCode();
+  const est = referralEstimate(phone, referralCode);
+  const choseCoupon = allowed && discountChoice() === "coupon";
+  const referralDiscount = !choseCoupon && est.applies && subtotal > 0 ? Math.round(subtotal / 10) : 0;
+  const discount = couponDiscount + referralDiscount;
   return {
     items: items,
     tabletTotal: tabletTotal,
     subtotal: subtotal,
     shipping: shipping,
     discount: discount,
+    couponDiscount: couponDiscount,
+    referralDiscount: referralDiscount,
+    referralCode: referralCode,
+    referralEstimate: est,
     couponAllowed: allowed,
     couponApplied: applied,
     couponCode: applied ? form.code : "",
@@ -371,9 +414,12 @@ function cartSummaryHtml(t) {
   const itemRows = t.items
     .map((it) => `<div><span>${lineLabel(it)}</span><span>${money(it.subtotal)}</span></div>`)
     .join("");
-  const discountRow = t.discount
-    ? `<div><span>首購折抵券</span><span>−${money(t.discount)}</span></div>`
+  let discountRow = t.couponDiscount
+    ? `<div><span>首購折抵券</span><span>−${money(t.couponDiscount)}</span></div>`
     : "";
+  if (t.referralDiscount) {
+    discountRow += `<div><span>推薦碼 9 折（預估）</span><span>−${money(t.referralDiscount)}</span></div>`;
+  }
   return `<div class="live-lines">
       ${itemRows}
       <div><span>商品小計（共 ${t.tabletTotal} 錠）</span><span>${money(t.subtotal)}</span></div>
@@ -387,6 +433,8 @@ function updateCouponSection(t) {
   const box = $("#coupon-box");
   if (!box) return;
   box.hidden = !t.couponAllowed;
+  const fields = $("#coupon-fields");
+  if (fields) fields.hidden = !(t.couponAllowed && discountChoice() === "coupon");
   const fb = $("#coupon-feedback");
   const count = $("#coupon-feedback-count");
   if (count) {
@@ -395,9 +443,72 @@ function updateCouponSection(t) {
   }
 }
 
+const REFERRAL_STATUS_TEXT = {
+  valid: "✅ 推薦碼有效，本單預估享 9 折；送出後綁定，之後回購也都 9 折。",
+  bound: "✅ 此手機已綁定推薦碼，本單自動享 9 折。",
+  ignored_already_bound: "此手機已綁定其他推薦碼（推薦碼不可更換），將沿用原推薦碼並享 9 折。",
+  not_found: "查無此推薦碼，請確認後再輸入；本單將以原價計算。",
+  own_code: "不可使用自己的推薦碼；本單將以原價計算。",
+  circular: "此推薦碼無法使用（對方已綁定你為推薦人）；本單將以原價計算。",
+};
+
+function updateReferralStatus(t) {
+  const el = $("#referral-status");
+  if (!el) return;
+  const est = t.referralEstimate || {};
+  let text = "";
+  let good = false;
+  if (est.result && est.result.available) {
+    const st = est.result.bound && est.result.codeStatus !== "ignored_already_bound" ? "bound" : est.result.codeStatus;
+    text = REFERRAL_STATUS_TEXT[st] || "";
+    good = !!est.result.applies;
+  } else if (est.unavailable && REFERRAL_CODE_RE.test(t.referralCode)) {
+    text = "系統暫時無法確認推薦碼，9 折將由客服確認後調整。";
+  }
+  if (text && good && t.couponDiscount) {
+    text += "（本單選擇使用折抵券，不打 9 折）";
+  }
+  el.textContent = text;
+  el.hidden = !text;
+  el.classList.toggle("ok", good);
+}
+
+let referralTimer = null;
+let referralSeq = 0;
+function scheduleReferralLookup() {
+  clearTimeout(referralTimer);
+  referralTimer = setTimeout(runReferralLookup, 450);
+}
+
+async function runReferralLookup() {
+  const phone = normalizePhone($("#phone") ? $("#phone").value : "");
+  const code = readReferralCode();
+  const key = phone + "|" + code;
+  if (!/^09\d{8}$/.test(phone)) return;
+  if (code && !REFERRAL_CODE_RE.test(code)) return;
+  if (state.referralLookup && state.referralLookup.key === key) return;
+  const seq = ++referralSeq;
+  let result;
+  try {
+    const res = await fetch(REFERRAL_CHECK_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: phone, code: code }),
+    });
+    const data = await res.json();
+    result = data && data.ok ? data : { available: false };
+  } catch (err) {
+    result = { available: false };
+  }
+  if (seq !== referralSeq) return;
+  state.referralLookup = { key: key, result: result };
+  updateTotals();
+}
+
 function updateTotals() {
   const t = totals();
   updateCouponSection(t);
+  updateReferralStatus(t);
   renderCartLines(t.items);
 
   const pillLabel = t.items.length ? `商品小計（共 ${t.tabletTotal} 錠）` : "商品小計";
@@ -443,7 +554,8 @@ function updateTotals() {
   if (display) {
     if (t.items.length) {
       display.classList.add("filled");
-      const discountBit = t.discount ? `　折抵 −${money(t.discount)}` : "";
+      const discountBit = (t.couponDiscount ? `　折抵 −${money(t.couponDiscount)}` : "") +
+        (t.referralDiscount ? `　推薦 9 折 −${money(t.referralDiscount)}（預估）` : "");
       display.innerHTML = t.items
         .map((it) => lineLabel(it))
         .join("<br>") + `<br>小計 ${money(t.subtotal)}${discountBit}　運費 ${t.shipping ? money(t.shipping) : "免運"}　合計 ${money(t.total)}`;
@@ -504,11 +616,18 @@ function validate() {
   showError("age-error", !v.ageOk);
   if (!v.ageOk) ok = false;
 
+  const refCode = readReferralCode();
+  const refOk = !refCode || REFERRAL_CODE_RE.test(refCode);
+  const refEl = $("#referral-code");
+  if (refEl) refEl.classList.toggle("invalid", !refOk);
+  showError("referral-error", !refOk);
+  if (!refOk) ok = false;
+
   const t = totals();
   const form = readCouponForm();
   const codeEl = $("#coupon-code");
   const fbEl = $("#coupon-feedback");
-  if (form.wants && t.couponAllowed) {
+  if (t.couponAllowed && discountChoice() === "coupon") {
     const codeOk = isCouponCode(form.code);
     const fbOk = form.feedback.length >= COUPON_FEEDBACK_MIN && form.feedback.length <= COUPON_FEEDBACK_MAX;
     if (codeEl) codeEl.classList.toggle("invalid", !codeOk);
@@ -544,6 +663,12 @@ function buildOrder() {
     shippingMethod: "7-11 賣貨便",
     freeShippingThreshold: FREE_SHIPPING_AT,
     discount: t.discount,
+    couponDiscount: t.couponDiscount,
+    referralDiscount: t.referralDiscount,
+    referralCode: t.referralCode,
+    referralConfirmed: false,
+    referralPending: false,
+    myReferralCode: "",
     couponCode: t.couponApplied ? t.couponCode : "",
     couponFeedback: t.couponApplied ? t.couponFeedback : "",
     publishConsent: t.couponApplied ? !!t.publishConsent : false,
@@ -581,15 +706,23 @@ function orderSummaryHtml(order, opts) {
     ...itemRows,
     ["商品小計", `${money(order.subtotal)}（共 ${order.tabletTotal} 錠）`],
   ];
-  if (order.discount) {
-    rows.push(["首購折抵券", "−" + money(order.discount) + "（" + escapeHtml(order.couponCode || "") + "，待客服核對）"]);
+  if (order.couponDiscount) {
+    rows.push(["首購折抵券", "−" + money(order.couponDiscount) + "（" + escapeHtml(order.couponCode || "") + "，待客服核對）"]);
+  }
+  if (order.referralDiscount) {
+    rows.push(["推薦碼 9 折", "−" + money(order.referralDiscount) + (order.referralConfirmed ? "" : "（預估，以系統確認為準）")]);
+  } else if (order.referralPending) {
+    rows.push(["推薦碼 9 折", "待客服確認後調整"]);
+  }
+  if (order.referralCode) {
+    rows.push(["輸入推薦碼", escapeHtml(order.referralCode)]);
   }
   rows.push(
     ["配送", order.shippingMethod],
     ["運費", order.shippingFee ? money(order.shippingFee) : "免運"],
     ["應付金額", money(order.total), true]
   );
-  if (order.discount) {
+  if (order.couponDiscount) {
     rows.push(["使用心得", escapeHtml(order.couponFeedback || "")]);
     rows.push(["刊登同意", order.publishConsent ? "是" : "否"]);
   }
@@ -630,14 +763,23 @@ function formatOrderText(order) {
     ...lines,
     `商品小計：${money(order.subtotal)}（共 ${order.tabletTotal} 錠）`,
   ];
-  if (order.discount) {
+  if (order.couponDiscount) {
     out.push("折抵券 " + order.couponCode + "（-NT$250，請核對是否為該客首購單且未使用過）");
+  }
+  if (order.referralDiscount) {
+    out.push("推薦 9 折：-" + money(order.referralDiscount) + (order.referralConfirmed ? "" : "（預估）"));
+  }
+  if (order.referralCode) {
+    out.push("推薦碼：" + order.referralCode + (order.referralPending ? "（待客服確認）" : ""));
   }
   out.push(
     `運費：${order.shippingFee ? money(order.shippingFee) : "免運"}`,
     `應付：${money(order.total)}`
   );
-  if (order.discount) {
+  if (order.myReferralCode) {
+    out.push("我的推薦碼：" + order.myReferralCode);
+  }
+  if (order.couponDiscount) {
     out.push("使用心得：" + (order.couponFeedback || ""));
     out.push("刊登同意：" + (order.publishConsent ? "是" : "否"));
   }
@@ -736,6 +878,8 @@ async function submitOrderToApi(order) {
     couponCode: order.couponCode || "",
     couponFeedback: order.couponFeedback || "",
     publishConsent: order.publishConsent === true,
+    referralCode: order.referralCode || "",
+    discountChoice: order.couponCode ? "coupon" : "referral",
   };
   const res = await fetch(ORDER_API, {
     method: "POST",
@@ -751,9 +895,27 @@ async function submitOrderToApi(order) {
   return { http: res.status, ...data };
 }
 
+// 以伺服器回傳的金額與推薦結果為準
+function applyServerResult(order, data) {
+  if (!data) return;
+  if (data.pricing && typeof data.pricing.total === "number") {
+    order.couponDiscount = Number(data.pricing.couponDiscount) || 0;
+    order.referralDiscount = Number(data.pricing.referralDiscount) || 0;
+    order.discount = order.couponDiscount + order.referralDiscount;
+    order.shippingFee = Number(data.pricing.shippingFee) || 0;
+    order.total = data.pricing.total;
+    order.referralConfirmed = true;
+  }
+  const ref = data.referral || {};
+  order.referralPending = !!ref.pending && (!!order.referralCode || !!(state.referralLookup && state.referralLookup.result && state.referralLookup.result.bound));
+  order.referralStatus = ref.status || "";
+  order.myReferralCode = REFERRAL_CODE_RE.test(String(data.myReferralCode || "")) ? data.myReferralCode : "";
+}
+
 async function finalizeOrder(order) {
   try {
     const data = await submitOrderToApi(order);
+    applyServerResult(order, data);
     if (data.ok && data.orderNo) {
       order.orderId = data.orderNo;
       showSuccess(order, { notified: true });
@@ -816,6 +978,29 @@ function showSuccess(order, opts) {
   if (couponNote) {
     couponNote.hidden = false;
     couponNote.textContent = PROMO_TEXT + "。若這是您的第一次購買，請保留本訂單編號「" + order.orderId + "」，作為下次折抵券代碼。";
+  }
+
+  const refBox = $("#success-referral");
+  if (refBox) {
+    refBox.hidden = !order.myReferralCode;
+    const codeEl = $("#success-referral-code");
+    if (codeEl) codeEl.textContent = order.myReferralCode || "";
+  }
+  const refPending = $("#success-referral-pending");
+  if (refPending) {
+    const msgs = [];
+    if (order.referralPending) {
+      msgs.push("系統暫時無法確認推薦碼，本單先以原價顯示，9 折將由客服確認後調整。");
+    } else if (order.referralCode && ["not_found", "own_code", "circular"].indexOf(order.referralStatus) >= 0) {
+      msgs.push("推薦碼「" + order.referralCode + "」無法使用，本單以原價計算。如有疑問請洽 LINE 客服。");
+    } else if (order.referralCode && order.referralStatus === "ignored_already_bound") {
+      msgs.push("此手機已綁定其他推薦碼（推薦碼不可更換），本單沿用原推薦碼。");
+    }
+    if (!order.myReferralCode && (order.referralConfirmed || order.referralPending)) {
+      msgs.push("你的專屬推薦碼將由 LINE 客服提供。分享你的推薦碼，朋友每次購買你都可得實付 10% 回饋金。" + REBATE_NOTE);
+    }
+    refPending.textContent = msgs.join(" ");
+    refPending.hidden = !msgs.length;
   }
 
   $("#success-screen").hidden = false;
@@ -929,6 +1114,35 @@ function init() {
   if (couponCode) couponCode.addEventListener("input", onCouponFormChange);
   if (couponFeedback) couponFeedback.addEventListener("input", onCouponFormChange);
   if (couponPublish) couponPublish.addEventListener("change", onCouponFormChange);
+  $$('input[name="discountChoice"]').forEach((el) => el.addEventListener("change", onCouponFormChange));
+  const refInput = $("#referral-code");
+  if (refInput) {
+    refInput.addEventListener("input", () => {
+      showError("referral-error", false);
+      refInput.classList.remove("invalid");
+      updateTotals();
+      scheduleReferralLookup();
+    });
+    refInput.addEventListener("blur", () => {
+      const code = readReferralCode();
+      const bad = !!code && !REFERRAL_CODE_RE.test(code);
+      refInput.classList.toggle("invalid", bad);
+      showError("referral-error", bad);
+    });
+  }
+  $("#phone").addEventListener("input", () => {
+    updateTotals();
+    scheduleReferralLookup();
+  });
+  const copyRef = $("#copy-referral-btn");
+  if (copyRef) {
+    copyRef.addEventListener("click", async () => {
+      const code = ($("#success-referral-code") || {}).textContent || "";
+      if (!code) return;
+      const ok = await copyText(code);
+      showToast(ok ? "推薦碼已複製，分享給朋友吧" : "請手動選取推薦碼");
+    });
+  }
 
   $("#phone").addEventListener("blur", () => {
     const ok = isTaiwanMobile($("#phone").value) || !$("#phone").value.trim();
@@ -968,6 +1182,7 @@ function init() {
     state.cart = {};
     state.pendingOrder = null;
     state.lastOrder = null;
+    state.referralLookup = null;
     $$(".plan-card").forEach((c) => {
       c.classList.remove("in-cart");
       const plan = planById(c.dataset.plan);

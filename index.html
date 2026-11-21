@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20261121-coupon1">
+  <link rel="stylesheet" href="styles.css?v=20261122-referral1">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect fill='%23050B18' width='32' height='32' rx='6'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='16' fill='%23E8C872'%3E大%3C/text%3E%3C/svg%3E">
 </head>
 <body class="age-open">
@@ -271,6 +271,10 @@
         <div class="promo-banner promo-banner-pricing" role="note">
           首購即送 NT$250 折抵券：下次購買附上使用心得，可全額折抵 NT$250
         </div>
+        <div class="promo-banner promo-banner-pricing promo-banner-referral" role="note">
+          <span>輸入推薦碼享 9 折，之後回購也都 9 折</span>
+          <span>分享你的推薦碼，朋友每次購買你都可得實付 10% 回饋金</span>
+        </div>
         <div class="pricing-grid" id="pricing-grid"></div>
         <div class="order-live card-panel" id="order-live">
           <h3 class="cart-title">購物車</h3>
@@ -340,8 +344,28 @@
               <textarea class="form-input" id="notes" name="notes" rows="3" placeholder="其他想告訴我們的事項"></textarea>
             </div>
 
+            <div class="form-group referral-group">
+              <label class="form-label" for="referral-code">推薦碼（選填）</label>
+              <input class="form-input" type="text" id="referral-code" name="referralCode" placeholder="例如：AB3CD5" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false">
+              <p class="field-hint" id="referral-hint">輸入推薦碼享 9 折，之後回購也都 9 折。已綁定推薦碼的回購客可留空，系統會依手機號碼自動套用。推薦碼第一次使用後即綁定，之後不可更換。</p>
+              <p class="field-error" id="referral-error" hidden>推薦碼為 6 碼英文字母與數字（不含 0、O、1、I），請再確認。</p>
+              <p class="referral-status" id="referral-status" hidden></p>
+            </div>
+
             <div class="coupon-box" id="coupon-box" hidden>
-              <h3 class="coupon-title">使用首購折抵券（NT$250）</h3>
+              <h3 class="coupon-title">本單優惠（二擇一）</h3>
+              <p class="coupon-note">推薦碼 9 折與首購 NT$250 折抵券不可同時使用，請選擇一種：</p>
+              <div class="discount-choice" role="radiogroup" aria-label="本單優惠">
+                <label class="agree discount-option">
+                  <input type="radio" name="discountChoice" id="choice-referral" value="referral" checked>
+                  <span>推薦碼 9 折（沒有推薦碼也選這個，即不使用折抵券）</span>
+                </label>
+                <label class="agree discount-option">
+                  <input type="radio" name="discountChoice" id="choice-coupon" value="coupon">
+                  <span>使用首購折抵券 NT$250（本單不打 9 折）</span>
+                </label>
+              </div>
+              <div class="coupon-fields" id="coupon-fields" hidden>
               <p class="coupon-note">折抵將由客服核對首購訂單後確認，每位客人限用一次</p>
               <div class="form-group">
                 <label class="form-label" for="coupon-code">首購訂單編號</label>
@@ -358,6 +382,7 @@
                 <input type="checkbox" id="coupon-publish" name="publishConsent">
                 <span>同意以匿名方式（例如：台北 陳先生）公開刊登我的使用心得</span>
               </label>
+              </div>
             </div>
 
             <div class="summary-mini" id="form-summary"></div>
@@ -401,6 +426,10 @@
           <details>
             <summary>下單後會怎麼通知我？</summary>
             <p>送出訂單後，系統會自動通知賣家。若自動通知失敗，請再複製訂單內容傳到 LINE 客服完成下單。</p>
+          </details>
+          <details>
+            <summary>推薦碼怎麼用？</summary>
+            <p>輸入推薦碼享 9 折，之後回購也都 9 折（與首購 NT$250 折抵券二擇一）。推薦碼第一次使用後就會和你的手機號碼綁定，之後不可更換。每位買過的客人都會拿到自己的專屬推薦碼：分享你的推薦碼，朋友每次購買你都可得實付 10% 回饋金（以商品實付金額計算，不含運費）。回饋金僅可作為購物金，不可兌換現金，請洽 LINE 客服折抵。</p>
           </details>
           <details>
             <summary>誰可以使用？</summary>
@@ -470,6 +499,16 @@
         </div>
         <p class="success-alert" id="success-alert" hidden></p>
         <p class="success-coupon-note" id="success-coupon-note" hidden></p>
+        <div class="success-referral" id="success-referral" hidden>
+          <p class="success-referral-title">你的專屬推薦碼</p>
+          <div class="success-referral-code-row">
+            <strong class="success-referral-code" id="success-referral-code"></strong>
+            <button type="button" class="btn-copy-id" id="copy-referral-btn" aria-label="複製推薦碼">複製</button>
+          </div>
+          <p class="success-referral-note">分享你的推薦碼，朋友每次購買你都可得實付 10% 回饋金；朋友輸入推薦碼享 9 折，之後回購也都 9 折。</p>
+          <p class="success-referral-note">回饋金僅可作為購物金，不可兌換現金，請洽 LINE 客服折抵。</p>
+        </div>
+        <p class="success-referral-pending" id="success-referral-pending" hidden></p>
         <div class="confirm-body" id="success-body"></div>
         <div class="order-text-wrap">
           <div class="order-text-head">
@@ -487,6 +526,6 @@
   </div>
 
   <div class="toast" id="toast" hidden role="status"></div>
-  <script src="app.js?v=20261121-coupon1"></script>
+  <script src="app.js?v=20261122-referral1"></script>
 </body>
 </html>

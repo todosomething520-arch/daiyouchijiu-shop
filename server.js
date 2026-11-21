@@ -11,6 +11,14 @@
  *   未設定 SHEET_* 時行為不變，訂單不會因為試算表失敗而失敗。
  *   本機未設環境變數時，可從 SECRETS_DIR 讀取。
  *   自動回覆走 Messaging API reply（免費），不是 push。
+ *
+ * 推薦碼（一層）：
+ *   試算表 Apps Script v3 是唯一的真實來源（action checkAndRecordV3 / lookupReferral）。
+ *   - 已綁定推薦人的手機，每筆訂單商品小計打 9 折（與 NT$250 折抵券二擇一）。
+ *   - 推薦人回饋金 = 實付商品金額（不含運費）× 10%，四捨五入到元，記在試算表 Members。
+ *   - 若試算表連不上、或仍是舊版腳本（回 unknown_action），一律不自動給 9 折：
+ *     訂單照原價成立（舊版腳本時改用 v2 checkAndRecord 記錄），LINE 標示「推薦碼待人工確認」，
+ *     客人畫面提示 9 折由客服確認後調整。
  */
 "use strict";
 
@@ -35,6 +43,8 @@ const COUPON_MIN_SUBTOTAL = 700;
 const COUPON_FEEDBACK_MIN = 30;
 const COUPON_FEEDBACK_MAX = 1000;
 const COUPON_CODE_RE = /^DY\d{6}-\d{3}$/;
+const REFERRAL_CODE_RE = /^[A-HJ-NP-Z2-9]{6}$/; // 6 碼，不含 0 O 1 I
+const REFERRAL_STATUSES = new Set(["none", "bound", "bound_now", "ignored_already_bound", "not_found", "own_code", "circular"]);
 const PRODUCT = "大又持久錠";
 
 const PLANS = Object.freeze({
@@ -84,6 +94,25 @@ function parseCoupon(body, subtotal) {
     couponCode: code,
     couponFeedback: feedback,
     publishConsent: consent.value,
+  };
+}
+
+function normalizeReferralCode(raw) {
+  return String(raw || "").replace(/[\s-]/g, "").toUpperCase();
+}
+
+// 與 apps-script/Code.gs 的 computeReferralPricing 相同公式
+function computeReferralPricing(subtotal, couponDiscount, shippingFee, isBound, couponUsed) {
+  const referralDiscount = isBound && !couponUsed ? Math.round(subtotal / 10) : 0;
+  const discount = (couponUsed ? couponDiscount : 0) + referralDiscount;
+  const productsPaid = Math.max(0, subtotal - discount);
+  const rebate = isBound ? Math.round(productsPaid / 10) : 0;
+  return {
+    referralDiscount: referralDiscount,
+    discount: discount,
+    productsPaid: productsPaid,
+    rebate: rebate,
+    total: productsPaid + shippingFee,
   };
 }
 
@@ -228,16 +257,20 @@ function formatOrderText(order) {
     "明細：",
   ].concat(lines);
   out.push("商品小計：" + money(order.subtotal) + "（共 " + order.tabletTotal + " 錠）");
-  if (order.discount) {
+  if (order.couponDiscount) {
     if (sheetOk) {
       out.push(formatCouponSheetLine(order.couponCode, sheet.couponStatus));
     } else {
       out.push("折抵券 " + order.couponCode + "（-NT$250，請核對是否為該客首購單且未使用過）");
     }
   }
+  if (order.referralDiscount) {
+    out.push("推薦 9 折：-" + money(order.referralDiscount));
+  }
   out.push("運費：" + (order.shippingFee ? money(order.shippingFee) : "免運"));
   out.push("應付：" + money(order.total));
-  if (order.discount) {
+  out.push.apply(out, formatReferralLines(order));
+  if (order.couponDiscount) {
     out.push("使用心得：" + (order.couponFeedback || ""));
     out.push("刊登同意：" + (order.publishConsent ? "是" : "否"));
   }
@@ -261,6 +294,46 @@ function formatOrderText(order) {
   return out.join("\n");
 }
 
+const REFERRAL_IGNORED_REASON = {
+  not_found: "查無此推薦碼",
+  own_code: "不可使用自己的推薦碼",
+  circular: "對方已綁定此客人，不可互綁",
+};
+
+function formatReferralLines(order) {
+  const ref = order.referral || {};
+  const entered = order.referralCodeEntered || "";
+  const out = [];
+  if (ref.pending) {
+    if (entered) {
+      out.push("⚠️ 推薦碼 " + entered + " 待人工確認（系統未能核對，本單以原價計；若有效請改收 9 折並記推薦人 10% 回饋金）");
+    } else {
+      out.push("⚠️ 推薦系統未連線：若此手機已綁定推薦碼，請人工改收 9 折並記推薦人回饋金");
+    }
+    out.push("客人推薦碼：系統未產生（待試算表恢復後補發）");
+    return out;
+  }
+  if (ref.status === "bound_now") {
+    out.push("推薦碼：" + ref.boundCode + "（本單新綁定✅）");
+  } else if (ref.status === "bound") {
+    out.push("已綁定推薦碼：" + ref.boundCode + (entered ? "" : "（回購自動 9 折）"));
+  } else if (ref.status === "ignored_already_bound") {
+    out.push("輸入推薦碼 " + entered + " 已忽略（此手機已綁定 " + ref.boundCode + "）");
+  } else if (REFERRAL_IGNORED_REASON[ref.status]) {
+    out.push("輸入推薦碼 " + entered + " 無效（" + REFERRAL_IGNORED_REASON[ref.status] + "），未打折");
+  }
+  if (ref.boundCode && !ref.applied && order.couponDiscount) {
+    out.push("本單使用折抵券，不套用推薦 9 折");
+  }
+  if (ref.boundCode) {
+    out.push("推薦人回饋金：" + money(ref.rebate || 0) + "（推薦人 " + ref.boundCode + "，已記入試算表）");
+  }
+  if (order.myReferralCode) {
+    out.push("客人專屬推薦碼：" + order.myReferralCode);
+  }
+  return out;
+}
+
 function itemsTextForSheet(order) {
   return (order.items || []).map(formatItemLine).join("；");
 }
@@ -277,8 +350,10 @@ function sheetOrderPayload(order) {
     itemsText: itemsTextForSheet(order),
     subtotal: order.subtotal,
     shippingFee: order.shippingFee,
-    discount: order.discount || 0,
+    discount: order.couponDiscount || 0,
+    couponDiscount: order.couponDiscount || 0,
     total: order.total,
+    referralCode: order.referralCodeEntered || "",
     couponCode: order.couponCode || "",
     couponFeedback: order.couponFeedback || "",
     publishConsent: order.publishConsent === true,
@@ -324,9 +399,15 @@ async function postJsonFollowRedirects(url, bodyObj, timeoutMs) {
         return {
           ok: true,
           http: res.status,
+          version: Number(data.version) || 2,
           isFirstPurchase: data.isFirstPurchase,
           couponStatus: data.couponStatus == null ? "" : String(data.couponStatus),
           suspectedDuplicate: !!data.suspectedDuplicate,
+          referral: data.referral && typeof data.referral === "object" ? data.referral : null,
+          myReferralCode: data.myReferralCode == null ? "" : String(data.myReferralCode),
+          bound: data.bound === true,
+          codeStatus: data.codeStatus == null ? "" : String(data.codeStatus),
+          applies: data.applies === true,
         };
       } catch (err) {
         return { ok: false, error: "invalid_json", http: res.status };
@@ -347,15 +428,72 @@ async function callSheetCheckAndRecord(order, cfg) {
     return { ok: false, skipped: true };
   }
   try {
-    return await postJsonFollowRedirects(
+    const payload = sheetOrderPayload(order);
+    const v3 = await postJsonFollowRedirects(
       cfg.url,
-      { secret: cfg.secret, action: "checkAndRecord", order: sheetOrderPayload(order) },
+      { secret: cfg.secret, action: "checkAndRecordV3", order: payload },
       8000
     );
+    if (v3.ok || v3.error !== "unknown_action") return v3;
+    // 舊版腳本尚未更新：不寫入就回 unknown_action，改用 v2 記錄訂單（推薦碼轉人工核對）
+    const v2 = await postJsonFollowRedirects(
+      cfg.url,
+      { secret: cfg.secret, action: "checkAndRecord", order: payload },
+      8000
+    );
+    v2.legacy = true;
+    return v2;
   } catch (err) {
     console.error("sheet webhook failed");
     return { ok: false, error: err && err.name === "AbortError" ? "timeout" : "network" };
   }
+}
+
+async function callSheetLookupReferral(phone, code, cfg) {
+  cfg = cfg || getSheetConfig();
+  if (!isSheetConfigured(cfg)) return { ok: false, skipped: true };
+  try {
+    return await postJsonFollowRedirects(
+      cfg.url,
+      { secret: cfg.secret, action: "lookupReferral", phone: phone, code: code },
+      6000
+    );
+  } catch (err) {
+    return { ok: false, error: "network" };
+  }
+}
+
+// 把試算表回傳的推薦結果套到訂單上；金額一律由伺服器依同一公式重算。
+function applySheetReferral(order, sheetResult) {
+  const ref = sheetResult && sheetResult.ok && sheetResult.version >= 3 ? sheetResult.referral : null;
+  if (!ref || !REFERRAL_STATUSES.has(String(ref.status))) {
+    order.referral = { pending: true, status: "pending", applied: false, discount: 0, rebate: 0, boundCode: "" };
+    order.myReferralCode = "";
+    return order;
+  }
+  const status = String(ref.status);
+  const boundCode = normalizeReferralCode(ref.boundCode);
+  const isBound = (status === "bound" || status === "bound_now" || status === "ignored_already_bound") &&
+    REFERRAL_CODE_RE.test(boundCode);
+  const couponUsed = !!(order.couponCode && order.couponDiscount > 0);
+  const price = computeReferralPricing(order.subtotal, order.couponDiscount || 0, order.shippingFee, isBound, couponUsed);
+  if (Number(ref.discount || 0) !== price.referralDiscount || Number(ref.rebate || 0) !== price.rebate) {
+    console.error("referral pricing mismatch between server and sheet for", order.orderNo);
+  }
+  order.referralDiscount = price.referralDiscount;
+  order.discount = price.discount;
+  order.total = price.total;
+  order.referral = {
+    pending: false,
+    status: status,
+    boundCode: isBound ? boundCode : "",
+    applied: price.referralDiscount > 0,
+    discount: price.referralDiscount,
+    rebate: price.rebate,
+  };
+  const mine = normalizeReferralCode(sheetResult.myReferralCode);
+  order.myReferralCode = REFERRAL_CODE_RE.test(mine) ? mine : "";
+  return order;
 }
 
 function parseItems(body) {
@@ -427,6 +565,10 @@ function validateAndBuild(body) {
   const shippingFee = subtotal >= FREE_SHIPPING_AT ? 0 : SHIPPING_FEE;
   const coupon = parseCoupon(body, subtotal);
   if (coupon.error) return coupon;
+  const referralCodeEntered = normalizeReferralCode(body.referralCode);
+  if (referralCodeEntered && !REFERRAL_CODE_RE.test(referralCodeEntered)) {
+    return { error: "invalid_referral_code" };
+  }
   const discount = coupon.discount || 0;
   const total = subtotal - discount + shippingFee;
   const orderNo = generateOrderNo();
@@ -439,6 +581,11 @@ function validateAndBuild(body) {
     tabletTotal,
     subtotal,
     discount,
+    couponDiscount: discount,
+    referralDiscount: 0,
+    referralCodeEntered,
+    referral: null,
+    myReferralCode: "",
     couponCode: coupon.couponCode || "",
     couponFeedback: coupon.couponFeedback || "",
     publishConsent: coupon.used ? coupon.publishConsent === true : false,
@@ -471,6 +618,45 @@ function rateLimited(ip) {
   while (globalHits.length && now - globalHits[0] > GLOBAL_WINDOW_MS) globalHits.shift();
   globalHits.push(now);
   return arr.length > RATE_MAX || globalHits.length > GLOBAL_MAX;
+}
+
+const lookupHits = new Map();
+const LOOKUP_WINDOW_MS = 10 * 60 * 1000;
+const LOOKUP_MAX = 30;
+
+function lookupRateLimited(ip) {
+  const now = Date.now();
+  const arr = (lookupHits.get(ip) || []).filter((t) => now - t < LOOKUP_WINDOW_MS);
+  arr.push(now);
+  lookupHits.set(ip, arr);
+  return arr.length > LOOKUP_MAX;
+}
+
+// 結帳頁預估用：只查詢，不寫入。真正的綁定與金額以送出訂單時為準。
+async function handleReferralCheck(req, res) {
+  if (lookupRateLimited(clientIp(req))) {
+    return json(res, 429, { ok: false, error: "rate_limited" });
+  }
+  let body;
+  try {
+    body = await readBody(req, 2 * 1024);
+  } catch (err) {
+    return json(res, 400, { ok: false, error: "invalid_body" });
+  }
+  const phone = normalizePhone(body && body.phone);
+  const code = normalizeReferralCode(body && body.code);
+  if (!/^09\d{8}$/.test(phone)) return json(res, 400, { ok: false, error: "invalid_phone" });
+  if (code && !REFERRAL_CODE_RE.test(code)) {
+    return json(res, 200, { ok: true, available: true, bound: false, codeStatus: "invalid_format", applies: false });
+  }
+  const r = await callSheetLookupReferral(phone, code);
+  if (!r.ok || r.version < 3) {
+    return json(res, 200, { ok: true, available: false });
+  }
+  const codeStatus = ["none", "bound", "valid", "ignored_already_bound", "not_found", "own_code", "circular"].indexOf(r.codeStatus) >= 0
+    ? r.codeStatus
+    : "none";
+  return json(res, 200, { ok: true, available: true, bound: !!r.bound, codeStatus: codeStatus, applies: !!r.applies });
 }
 
 function json(res, status, obj) {
@@ -563,9 +749,11 @@ async function handleOrder(req, res) {
   const sheetResult = await callSheetCheckAndRecord(order);
   if (sheetResult && sheetResult.ok) {
     order.sheetResult = sheetResult;
+    if (sheetResult.legacy) console.error("sheet script is v2; referral needs manual check");
   } else if (sheetResult && !sheetResult.skipped) {
     console.error("sheet webhook unavailable; using manual-check text");
   }
+  applySheetReferral(order, sheetResult);
   const text = formatOrderText(order);
   let push;
   try {
@@ -573,7 +761,7 @@ async function handleOrder(req, res) {
   } catch (err) {
     console.error("LINE push network error for", order.orderNo);
     appendOrderLog({ ...order, linePushStatus: 0, linePushOk: false });
-    return json(res, 502, { ok: false, error: "notify_failed", orderNo: order.orderNo });
+    return json(res, 502, Object.assign({ ok: false, error: "notify_failed" }, orderResponse(order)));
   }
 
   console.log("order", order.orderNo, "LINE push", push.status);
@@ -584,9 +772,30 @@ async function handleOrder(req, res) {
   });
 
   if (!push.ok) {
-    return json(res, 502, { ok: false, error: "notify_failed", orderNo: order.orderNo });
+    return json(res, 502, Object.assign({ ok: false, error: "notify_failed" }, orderResponse(order)));
   }
-  return json(res, 200, { ok: true, orderNo: order.orderNo });
+  return json(res, 200, Object.assign({ ok: true }, orderResponse(order)));
+}
+
+function orderResponse(order) {
+  const ref = order.referral || {};
+  return {
+    orderNo: order.orderNo,
+    pricing: {
+      subtotal: order.subtotal,
+      couponDiscount: order.couponDiscount || 0,
+      referralDiscount: order.referralDiscount || 0,
+      shippingFee: order.shippingFee,
+      total: order.total,
+    },
+    referral: {
+      status: ref.status || "none",
+      applied: !!ref.applied,
+      pending: !!ref.pending,
+      enteredCode: order.referralCodeEntered || "",
+    },
+    myReferralCode: order.myReferralCode || "",
+  };
 }
 
 
@@ -595,6 +804,7 @@ const MSG_WELCOME = [
   "👉 線上下單：" + SHOP_URL,
   "方案：1錠 NT$250／3錠 NT$700／5錠 NT$1,100／10錠以上每錠 NT$200",
   "首購即送 NT$250 折抵券：下次購買附上使用心得，可全額折抵 NT$250",
+  "輸入推薦碼享 9 折，之後回購也都 9 折",
   "7-11 賣貨便寄送，運費 NT$60，滿 NT$3,000 免運。",
   "客服 24 小時服務，有任何問題直接在這裡留言。",
   "※本產品為健康輔助食品，非藥品。效果因人而異，建議遵照指示使用。",
@@ -607,6 +817,7 @@ const MSG_PLANS = [
   "・5錠組 NT$1,100",
   "・10錠以上批量優惠，每錠 NT$200",
   "首購即送 NT$250 折抵券：下次購買附上使用心得，可全額折抵 NT$250",
+  "輸入推薦碼享 9 折，之後回購也都 9 折（與折抵券二擇一）",
   "可一次選購多種方案。線上下單：" + SHOP_URL,
 ].join("\n");
 
@@ -803,6 +1014,13 @@ function createServer() {
     });
   }
 
+  if (url.split("?")[0] === "/api/referral/check") {
+    if (method !== "POST") return json(res, 405, { ok: false, error: "method_not_allowed" });
+    return handleReferralCheck(req, res).catch(() => {
+      if (!res.headersSent) json(res, 500, { ok: false, error: "server_error" });
+    });
+  }
+
   if (url.split("?")[0] === "/api/order") {
     if (method === "OPTIONS") {
       res.writeHead(204, {
@@ -847,6 +1065,12 @@ module.exports = {
   MSG_DEFAULT,
   parseCoupon,
   callSheetCheckAndRecord,
+  callSheetLookupReferral,
+  applySheetReferral,
+  computeReferralPricing,
+  normalizeReferralCode,
+  formatReferralLines,
+  REFERRAL_CODE_RE,
   postJsonFollowRedirects,
   getSheetConfig,
   isSheetConfigured,
