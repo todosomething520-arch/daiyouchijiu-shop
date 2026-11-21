@@ -133,6 +133,8 @@ function getOrdersSheet() {
       sheet.setFrozenRows(1);
     }
   }
+  // Keep leading zeros on phone numbers (column D).
+  sheet.getRange("D:D").setNumberFormat("@");
   return sheet;
 }
 
@@ -234,7 +236,10 @@ function formatTaipeiTime(iso) {
 }
 
 function normPhone(s) {
-  return String(s || "").replace(/[\s-]/g, "");
+  var p = String(s || "").replace(/[\s-]/g, "");
+  // Sheets may coerce 09xxxxxxxx to a number and drop the leading zero.
+  if (/^9\d{8}$/.test(p)) p = "0" + p;
+  return p;
 }
 
 function normCode(s) {

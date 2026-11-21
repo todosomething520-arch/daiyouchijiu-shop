@@ -165,8 +165,10 @@ if (!LINE_CHANNEL_SECRET) {
 }
 
 function getSheetConfig() {
-  const url = (process.env.SHEET_WEBHOOK_URL || readSecret("SHEET_WEBHOOK_URL", "sheet_webhook_url") || "").trim();
-  const secret = (process.env.SHEET_SECRET || readSecret("SHEET_SECRET", "sheet_secret") || "").trim();
+  // Only environment variables, not the secrets directory: the sheet hook
+  // stays off until SHEET_WEBHOOK_URL and SHEET_SECRET are set on the host.
+  const url = (process.env.SHEET_WEBHOOK_URL || "").trim();
+  const secret = (process.env.SHEET_SECRET || "").trim();
   return { url: url, secret: secret };
 }
 
@@ -291,12 +293,15 @@ async function postJsonFollowRedirects(url, bodyObj, timeoutMs) {
   }, timeoutMs);
   try {
     let current = url;
+    let method = "POST";
     const payload = JSON.stringify(bodyObj);
     for (let hop = 0; hop < 6; hop++) {
       const res = await fetch(current, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: payload,
+        method: method,
+        headers: method === "POST"
+          ? { "Content-Type": "application/json", Accept: "application/json" }
+          : { Accept: "application/json" },
+        body: method === "POST" ? payload : undefined,
         redirect: "manual",
         signal: controller.signal,
       });
@@ -304,6 +309,9 @@ async function postJsonFollowRedirects(url, bodyObj, timeoutMs) {
         const loc = res.headers.get("location");
         if (!loc) return { ok: false, error: "redirect_missing", http: res.status };
         current = new URL(loc, current).href;
+        // Apps Script processes the POST on the first hop, then 302s to an
+        // echo URL that must be retrieved with GET. Do not POST again.
+        method = "GET";
         continue;
       }
       const text = await res.text();
