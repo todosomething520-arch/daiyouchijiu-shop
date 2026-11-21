@@ -28,6 +28,11 @@ const SHOP_URL = "https://daiyouchijiu-shop.onrender.com";
 
 const SHIPPING_FEE = 60;
 const FREE_SHIPPING_AT = 3000;
+const COUPON_DISCOUNT = 250;
+const COUPON_MIN_SUBTOTAL = 700;
+const COUPON_FEEDBACK_MIN = 30;
+const COUPON_FEEDBACK_MAX = 1000;
+const COUPON_CODE_RE = /^DY\d{6}-\d{3}$/;
 const PRODUCT = "大又持久錠";
 
 const PLANS = Object.freeze({
@@ -47,6 +52,38 @@ const LIMITS = {
   qty: [1, 20],
   maxLines: 5,
 };
+
+function normalizeCouponCode(raw) {
+  return String(raw || "").trim().toUpperCase();
+}
+
+function parsePublishConsent(value) {
+  if (value === true || value === false) return { value: value };
+  return { error: "invalid_publish_consent" };
+}
+
+function parseCoupon(body, subtotal) {
+  const code = normalizeCouponCode(body && body.couponCode);
+  const feedback = clampText(body && body.couponFeedback);
+  const hasIntent = !!(code || feedback);
+  if (!hasIntent) {
+    return { used: false, discount: 0, couponCode: "", couponFeedback: "", publishConsent: false };
+  }
+  if (subtotal < COUPON_MIN_SUBTOTAL) return { error: "coupon_not_eligible" };
+  if (!COUPON_CODE_RE.test(code)) return { error: "invalid_coupon_code" };
+  if (feedback.length < COUPON_FEEDBACK_MIN || feedback.length > COUPON_FEEDBACK_MAX) {
+    return { error: "invalid_coupon_feedback" };
+  }
+  const consent = parsePublishConsent(body.publishConsent);
+  if (consent.error) return consent;
+  return {
+    used: true,
+    discount: COUPON_DISCOUNT,
+    couponCode: code,
+    couponFeedback: feedback,
+    publishConsent: consent.value,
+  };
+}
 
 function qtyBounds(plan) {
   if (plan && plan.bulk) return [plan.qtyMin, plan.qtyMax];
@@ -153,20 +190,28 @@ function generateOrderNo() {
 function formatOrderText(order) {
   const c = order.customer;
   const lines = (order.items || []).map(formatItemLine);
-  return [
-    `訂單編號：${order.orderNo}`,
-    `商品：${order.product}`,
+  const out = [
+    "訂單編號：" + order.orderNo,
+    "商品：" + order.product,
     "明細：",
-    ...lines,
-    `商品小計：${money(order.subtotal)}（共 ${order.tabletTotal} 錠）`,
-    `運費：${order.shippingFee ? money(order.shippingFee) : "免運"}`,
-    `應付：${money(order.total)}`,
-    `姓名：${c.name}`,
-    `手機：${c.phone}`,
-    `LINE ID：${c.lineId || "（未填）"}`,
-    `7-11門市：${c.store}`,
-    `備註：${c.notes || "（無）"}`,
-  ].join("\n");
+  ].concat(lines);
+  out.push("商品小計：" + money(order.subtotal) + "（共 " + order.tabletTotal + " 錠）");
+  if (order.discount) {
+    out.push("折抵券 " + order.couponCode + "（-NT$250，請核對是否為該客首購單且未使用過）");
+  }
+  out.push("運費：" + (order.shippingFee ? money(order.shippingFee) : "免運"));
+  out.push("應付：" + money(order.total));
+  if (order.discount) {
+    out.push("使用心得：" + (order.couponFeedback || ""));
+    out.push("刊登同意：" + (order.publishConsent ? "是" : "否"));
+  }
+  out.push("若為首購→此單號即折抵券");
+  out.push("姓名：" + c.name);
+  out.push("手機：" + c.phone);
+  out.push("LINE ID：" + (c.lineId || "（未填）"));
+  out.push("7-11門市：" + c.store);
+  out.push("備註：" + (c.notes || "（無）"));
+  return out.join("\n");
 }
 
 function parseItems(body) {
@@ -236,7 +281,10 @@ function validateAndBuild(body) {
   const subtotal = items.reduce((s, it) => s + it.subtotal, 0);
   const tabletTotal = items.reduce((s, it) => s + it.tabletTotal, 0);
   const shippingFee = subtotal >= FREE_SHIPPING_AT ? 0 : SHIPPING_FEE;
-  const total = subtotal + shippingFee;
+  const coupon = parseCoupon(body, subtotal);
+  if (coupon.error) return coupon;
+  const discount = coupon.discount || 0;
+  const total = subtotal - discount + shippingFee;
   const orderNo = generateOrderNo();
 
   const order = {
@@ -246,6 +294,10 @@ function validateAndBuild(body) {
     items,
     tabletTotal,
     subtotal,
+    discount,
+    couponCode: coupon.couponCode || "",
+    couponFeedback: coupon.couponFeedback || "",
+    publishConsent: coupon.used ? coupon.publishConsent === true : false,
     shippingFee,
     shippingMethod: "7-11 賣貨便",
     total,
@@ -392,6 +444,7 @@ const MSG_WELCOME = [
   "感謝加入「大又持久錠」🙏",
   "👉 線上下單：" + SHOP_URL,
   "方案：1錠 NT$250／3錠 NT$700／5錠 NT$1,100／10錠以上每錠 NT$200",
+  "首購即送 NT$250 折抵券：下次購買附上使用心得，可全額折抵 NT$250",
   "7-11 賣貨便寄送，運費 NT$60，滿 NT$3,000 免運。",
   "客服 24 小時服務，有任何問題直接在這裡留言。",
   "※本產品為健康輔助食品，非藥品。效果因人而異，建議遵照指示使用。",
@@ -403,6 +456,7 @@ const MSG_PLANS = [
   "・3錠組 NT$700",
   "・5錠組 NT$1,100",
   "・10錠以上批量優惠，每錠 NT$200",
+  "首購即送 NT$250 折抵券：下次購買附上使用心得，可全額折抵 NT$250",
   "可一次選購多種方案。線上下單：" + SHOP_URL,
 ].join("\n");
 
@@ -639,10 +693,14 @@ module.exports = {
   verifyLineSignature,
   isSellerUser,
   MSG_WELCOME,
+  MSG_PLANS,
   MSG_DEFAULT,
+  parseCoupon,
   PLANS,
   SHIPPING_FEE,
   FREE_SHIPPING_AT,
+  COUPON_DISCOUNT,
+  COUPON_MIN_SUBTOTAL,
 };
 
 process.on("uncaughtException", (err) => {

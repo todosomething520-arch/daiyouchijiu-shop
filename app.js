@@ -7,6 +7,12 @@
 /* ========== 可調整設定 ========== */
 const SHIPPING_FEE = 60; // 7-11 賣貨便運費（新台幣）；以後端重算為準
 const FREE_SHIPPING_AT = 3000; // 商品金額滿此金額免運
+const COUPON_DISCOUNT = 250; // 首購折抵券金額；以後端重算為準
+const COUPON_MIN_SUBTOTAL = 700; // 折抵門檻（商品小計，折抵前）
+const COUPON_FEEDBACK_MIN = 30;
+const COUPON_FEEDBACK_MAX = 1000;
+const COUPON_CODE_RE = /^DY\d{6}-\d{3}$/;
+const PROMO_TEXT = "首購即送 NT$250 折抵券：下次購買附上使用心得，可全額折抵 NT$250";
 const LINE_OA_URL = "https://line.me/R/ti/p/@997baoaw"; // 官方帳號加好友連結
 const LINE_OA_ID = "@997baoaw"; // 官方帳號 ID（可搜尋）
 const ORDER_API = "/api/order";
@@ -106,17 +112,55 @@ function cartItems() {
   }).filter(Boolean);
 }
 
+function normalizeCouponCode(raw) {
+  return String(raw || "").trim().toUpperCase();
+}
+
+function isCouponCode(code) {
+  return COUPON_CODE_RE.test(normalizeCouponCode(code));
+}
+
+function couponAllowed(subtotal) {
+  return subtotal >= COUPON_MIN_SUBTOTAL;
+}
+
+function readCouponForm() {
+  const codeEl = $("#coupon-code");
+  const fbEl = $("#coupon-feedback");
+  const pubEl = $("#coupon-publish");
+  const code = normalizeCouponCode(codeEl ? codeEl.value : "");
+  const feedback = fbEl ? String(fbEl.value || "").trim() : "";
+  const publishConsent = !!(pubEl && pubEl.checked);
+  const wants = !!(code || feedback);
+  return { code: code, feedback: feedback, publishConsent: publishConsent, wants: wants };
+}
+
+function couponReady(form, allowed) {
+  if (!allowed || !form.wants) return false;
+  return isCouponCode(form.code) && form.feedback.length >= COUPON_FEEDBACK_MIN && form.feedback.length <= COUPON_FEEDBACK_MAX;
+}
+
 function totals() {
   const items = cartItems();
   const subtotal = items.reduce((s, it) => s + it.subtotal, 0);
   const tabletTotal = items.reduce((s, it) => s + it.tabletTotal, 0);
   const shipping = subtotal === 0 ? 0 : subtotal >= FREE_SHIPPING_AT ? 0 : SHIPPING_FEE;
+  const allowed = couponAllowed(subtotal);
+  const form = readCouponForm();
+  const applied = couponReady(form, allowed);
+  const discount = applied ? COUPON_DISCOUNT : 0;
   return {
-    items,
-    tabletTotal,
-    subtotal,
-    shipping,
-    total: subtotal + shipping,
+    items: items,
+    tabletTotal: tabletTotal,
+    subtotal: subtotal,
+    shipping: shipping,
+    discount: discount,
+    couponAllowed: allowed,
+    couponApplied: applied,
+    couponCode: applied ? form.code : "",
+    couponFeedback: applied ? form.feedback : "",
+    publishConsent: applied ? form.publishConsent : false,
+    total: subtotal - discount + shipping,
     free: subtotal >= FREE_SHIPPING_AT,
     remain: Math.max(0, FREE_SHIPPING_AT - subtotal),
   };
@@ -327,16 +371,33 @@ function cartSummaryHtml(t) {
   const itemRows = t.items
     .map((it) => `<div><span>${lineLabel(it)}</span><span>${money(it.subtotal)}</span></div>`)
     .join("");
+  const discountRow = t.discount
+    ? `<div><span>首購折抵券</span><span>−${money(t.discount)}</span></div>`
+    : "";
   return `<div class="live-lines">
       ${itemRows}
       <div><span>商品小計（共 ${t.tabletTotal} 錠）</span><span>${money(t.subtotal)}</span></div>
+      ${discountRow}
       <div><span>運費</span><span>${t.shipping ? money(t.shipping) : "免運"}</span></div>
       <div class="total"><span>應付金額</span><span>${money(t.total)}</span></div>
     </div>`;
 }
 
+function updateCouponSection(t) {
+  const box = $("#coupon-box");
+  if (!box) return;
+  box.hidden = !t.couponAllowed;
+  const fb = $("#coupon-feedback");
+  const count = $("#coupon-feedback-count");
+  if (count) {
+    const n = fb ? String(fb.value || "").trim().length : 0;
+    count.textContent = n + " / " + COUPON_FEEDBACK_MAX + " 字（至少 " + COUPON_FEEDBACK_MIN + " 字）";
+  }
+}
+
 function updateTotals() {
   const t = totals();
+  updateCouponSection(t);
   renderCartLines(t.items);
 
   const pillLabel = t.items.length ? `商品小計（共 ${t.tabletTotal} 錠）` : "商品小計";
@@ -382,9 +443,10 @@ function updateTotals() {
   if (display) {
     if (t.items.length) {
       display.classList.add("filled");
+      const discountBit = t.discount ? `　折抵 −${money(t.discount)}` : "";
       display.innerHTML = t.items
         .map((it) => lineLabel(it))
-        .join("<br>") + `<br>小計 ${money(t.subtotal)}　運費 ${t.shipping ? money(t.shipping) : "免運"}　合計 ${money(t.total)}`;
+        .join("<br>") + `<br>小計 ${money(t.subtotal)}${discountBit}　運費 ${t.shipping ? money(t.shipping) : "免運"}　合計 ${money(t.total)}`;
     } else {
       display.classList.remove("filled");
       display.textContent = "請先將方案加入購物車";
@@ -442,6 +504,25 @@ function validate() {
   showError("age-error", !v.ageOk);
   if (!v.ageOk) ok = false;
 
+  const t = totals();
+  const form = readCouponForm();
+  const codeEl = $("#coupon-code");
+  const fbEl = $("#coupon-feedback");
+  if (form.wants && t.couponAllowed) {
+    const codeOk = isCouponCode(form.code);
+    const fbOk = form.feedback.length >= COUPON_FEEDBACK_MIN && form.feedback.length <= COUPON_FEEDBACK_MAX;
+    if (codeEl) codeEl.classList.toggle("invalid", !codeOk);
+    if (fbEl) fbEl.classList.toggle("invalid", !fbOk);
+    showError("coupon-code-error", !codeOk);
+    showError("coupon-feedback-error", !fbOk);
+    if (!codeOk || !fbOk) ok = false;
+  } else {
+    if (codeEl) codeEl.classList.remove("invalid");
+    if (fbEl) fbEl.classList.remove("invalid");
+    showError("coupon-code-error", false);
+    showError("coupon-feedback-error", false);
+  }
+
   return ok;
 }
 
@@ -462,6 +543,10 @@ function buildOrder() {
     shippingLabel: t.shipping === 0 ? "免運" : money(t.shipping),
     shippingMethod: "7-11 賣貨便",
     freeShippingThreshold: FREE_SHIPPING_AT,
+    discount: t.discount,
+    couponCode: t.couponApplied ? t.couponCode : "",
+    couponFeedback: t.couponApplied ? t.couponFeedback : "",
+    publishConsent: t.couponApplied ? !!t.publishConsent : false,
     total: t.total,
     customer: {
       name: v.name,
@@ -471,6 +556,14 @@ function buildOrder() {
       notes: v.notes || "",
     },
   };
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function orderSummaryHtml(order, opts) {
@@ -487,15 +580,26 @@ function orderSummaryHtml(order, opts) {
     ["商品", order.product],
     ...itemRows,
     ["商品小計", `${money(order.subtotal)}（共 ${order.tabletTotal} 錠）`],
+  ];
+  if (order.discount) {
+    rows.push(["首購折抵券", "−" + money(order.discount) + "（" + escapeHtml(order.couponCode || "") + "，待客服核對）"]);
+  }
+  rows.push(
     ["配送", order.shippingMethod],
     ["運費", order.shippingFee ? money(order.shippingFee) : "免運"],
-    ["應付金額", money(order.total), true],
-    ["姓名", c.name],
+    ["應付金額", money(order.total), true]
+  );
+  if (order.discount) {
+    rows.push(["使用心得", escapeHtml(order.couponFeedback || "")]);
+    rows.push(["刊登同意", order.publishConsent ? "是" : "否"]);
+  }
+  rows.push(
+    ["姓名", escapeHtml(c.name)],
     ["手機", c.phone],
-    ["LINE ID", c.lineId || "（未填）"],
-    ["7-11 門市", c.store],
-    ["備註", c.notes || "（無）"],
-  ];
+    ["LINE ID", escapeHtml(c.lineId || "（未填）")],
+    ["7-11 門市", escapeHtml(c.store)],
+    ["備註", escapeHtml(c.notes || "（無）")]
+  );
   const body = rows
     .map(
       function (row) {
@@ -519,20 +623,33 @@ function formatOrderText(order) {
       ? `・批量 × ${it.tabletTotal} 錠　${money(it.subtotal)}`
       : `・${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`
   );
-  return [
+  const out = [
     `訂單編號：${order.orderId}`,
     `商品：${order.product}`,
     "明細：",
     ...lines,
     `商品小計：${money(order.subtotal)}（共 ${order.tabletTotal} 錠）`,
+  ];
+  if (order.discount) {
+    out.push("折抵券 " + order.couponCode + "（-NT$250，請核對是否為該客首購單且未使用過）");
+  }
+  out.push(
     `運費：${order.shippingFee ? money(order.shippingFee) : "免運"}`,
-    `應付：${money(order.total)}`,
+    `應付：${money(order.total)}`
+  );
+  if (order.discount) {
+    out.push("使用心得：" + (order.couponFeedback || ""));
+    out.push("刊登同意：" + (order.publishConsent ? "是" : "否"));
+  }
+  out.push(
+    "若為首購→此單號即折抵券",
     `姓名：${c.name}`,
     `手機：${c.phone}`,
     `LINE ID：${c.lineId || "（未填）"}`,
     `7-11門市：${c.store}`,
-    `備註：${c.notes || "（無）"}`,
-  ].join("\n");
+    `備註：${c.notes || "（無）"}`
+  );
+  return out.join("\n");
 }
 
 function copyText(text) {
@@ -616,6 +733,9 @@ async function submitOrderToApi(order) {
     store: order.customer.store,
     notes: order.customer.notes,
     website: $("#website") ? $("#website").value : "",
+    couponCode: order.couponCode || "",
+    couponFeedback: order.couponFeedback || "",
+    publishConsent: order.publishConsent === true,
   };
   const res = await fetch(ORDER_API, {
     method: "POST",
@@ -690,6 +810,12 @@ function showSuccess(order, opts) {
       lineBtn.className = "btn btn-line";
       lineBtn.textContent = "傳送訂單到 LINE 完成下單";
     }
+  }
+
+  const couponNote = $("#success-coupon-note");
+  if (couponNote) {
+    couponNote.hidden = false;
+    couponNote.textContent = PROMO_TEXT + "。若這是您的第一次購買，請保留本訂單編號「" + order.orderId + "」，作為下次折抵券代碼。";
   }
 
   $("#success-screen").hidden = false;
@@ -794,6 +920,16 @@ function init() {
   runInitStep("setupStickyBar", setupStickyBar);
 
   runInitStep("bindForm", function () {
+  const couponCode = $("#coupon-code");
+  const couponFeedback = $("#coupon-feedback");
+  const couponPublish = $("#coupon-publish");
+  function onCouponFormChange() {
+    updateTotals();
+  }
+  if (couponCode) couponCode.addEventListener("input", onCouponFormChange);
+  if (couponFeedback) couponFeedback.addEventListener("input", onCouponFormChange);
+  if (couponPublish) couponPublish.addEventListener("change", onCouponFormChange);
+
   $("#phone").addEventListener("blur", () => {
     const ok = isTaiwanMobile($("#phone").value) || !$("#phone").value.trim();
     $("#phone").classList.toggle("invalid", !ok && $("#phone").value.trim());
