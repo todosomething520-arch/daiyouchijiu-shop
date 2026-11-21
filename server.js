@@ -19,7 +19,7 @@ const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_DIR = path.resolve(__dirname);
 const SECRETS_DIR = process.env.SECRETS_DIR || "/workspace/onepage-shop-secrets";
-const DATA_DIR = process.env.DATA_DIR || "/workspace/onepage-shop-data";
+const DATA_DIR = process.env.DATA_DIR || require("os").tmpdir() + "/onepage-shop-data";
 const LINE_API = "https://api.line.me/v2/bot/message/push";
 
 const SHIPPING_FEE = 60;
@@ -82,8 +82,7 @@ if (!LINE_TOKEN || !LINE_USER_ID) {
 try {
   fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 } catch (err) {
-  console.error("Cannot create data dir");
-  process.exit(1);
+  console.error("Cannot create data dir; orders will not be written to disk");
 }
 
 function money(n) {
