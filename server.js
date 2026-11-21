@@ -4,9 +4,11 @@
  *
  * 啟動：
  *   環境變數（部署時務必用 Render env，不要寫進 Git）：
- *     LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID（或 LINE_SELLER_USER_ID）
+ *     LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID（或 LINE_SELLER_USER_ID）,
+ *     LINE_CHANNEL_SECRET（僅供 /webhook/line 驗簽，勿寫進 Git）
  *     HOST=0.0.0.0  PORT 由平台注入
  *   本機未設環境變數時，可從 SECRETS_DIR 讀取。
+ *   自動回覆走 Messaging API reply（免費），不是 push。
  */
 "use strict";
 
@@ -21,6 +23,8 @@ const PUBLIC_DIR = path.resolve(__dirname);
 const SECRETS_DIR = process.env.SECRETS_DIR || "/workspace/onepage-shop-secrets";
 const DATA_DIR = process.env.DATA_DIR || require("os").tmpdir() + "/onepage-shop-data";
 const LINE_API = "https://api.line.me/v2/bot/message/push";
+const LINE_REPLY_API = "https://api.line.me/v2/bot/message/reply";
+const SHOP_URL = "https://daiyouchijiu-shop.onrender.com";
 
 const SHIPPING_FEE = 60;
 const FREE_SHIPPING_AT = 3000;
@@ -111,10 +115,14 @@ const LINE_TOKEN = readSecret("LINE_CHANNEL_ACCESS_TOKEN", "line_token");
 const LINE_USER_ID =
   (process.env.LINE_USER_ID && process.env.LINE_USER_ID.trim()) ||
   readSecret("LINE_SELLER_USER_ID", "line_user_id");
+const LINE_CHANNEL_SECRET = readSecret("LINE_CHANNEL_SECRET", "line_channel_secret");
 
 if (!LINE_TOKEN || !LINE_USER_ID) {
   console.error("Missing LINE credentials (env or secrets dir). Refusing to start.");
   process.exit(1);
+}
+if (!LINE_CHANNEL_SECRET) {
+  console.error("Missing LINE_CHANNEL_SECRET; /webhook/line will reject requests.");
 }
 
 try {
@@ -379,6 +387,145 @@ async function handleOrder(req, res) {
   return json(res, 200, { ok: true, orderNo: order.orderNo });
 }
 
+
+const MSG_WELCOME = [
+  "感謝加入「大又持久錠」🙏",
+  "👉 線上下單：" + SHOP_URL,
+  "方案：1錠 NT$250／3錠 NT$700／5錠 NT$1,100／10錠以上每錠 NT$200",
+  "7-11 賣貨便寄送，運費 NT$60，滿 NT$3,000 免運。",
+  "客服 24 小時服務，有任何問題直接在這裡留言。",
+  "※本產品為健康輔助食品，非藥品。效果因人而異，建議遵照指示使用。",
+].join("\n");
+
+const MSG_PLANS = [
+  "目前方案如下：",
+  "・1錠體驗 NT$250",
+  "・3錠組 NT$700",
+  "・5錠組 NT$1,100",
+  "・10錠以上批量優惠，每錠 NT$200",
+  "可一次選購多種方案。線上下單：" + SHOP_URL,
+].join("\n");
+
+const MSG_ORDER = [
+  "請由此頁面直接下單：",
+  SHOP_URL,
+  "下單後系統會自動通知客服出貨。若有問題也可直接在這裡留言，客服 24 小時服務。",
+].join("\n");
+
+const MSG_SHIP = "目前提供 7-11 賣貨便寄送，運費 NT$60；商品金額滿 NT$3,000 免運。";
+
+const MSG_DEFAULT = "已收到您的訊息，客服 24 小時服務，會盡快回覆您！想立即下單請點：" + SHOP_URL;
+
+function autoReplyText(text) {
+  const t = String(text || "");
+  if (/運費|寄送|免運/.test(t)) return MSG_SHIP;
+  if (/下單|訂購|購買|怎麼買/.test(t)) return MSG_ORDER;
+  if (/價格|方案|多少錢/.test(t)) return MSG_PLANS;
+  return MSG_DEFAULT;
+}
+
+function verifyLineSignature(rawBuf, signature, secret) {
+  const key = secret != null ? secret : LINE_CHANNEL_SECRET;
+  if (!key || !signature || !rawBuf) return false;
+  const digest = crypto.createHmac("sha256", key).update(rawBuf).digest("base64");
+  const a = Buffer.from(digest);
+  const b = Buffer.from(String(signature).trim());
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function isSellerUser(userId) {
+  return !!(LINE_USER_ID && userId && String(userId) === String(LINE_USER_ID));
+}
+
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(Object.assign(new Error("too_large"), { code: "too_large" }));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+async function replyLine(replyToken, text) {
+  const res = await fetch(LINE_REPLY_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + LINE_TOKEN,
+    },
+    body: JSON.stringify({
+      replyToken: replyToken,
+      messages: [{ type: "text", text: text }],
+    }),
+  });
+  return { status: res.status, ok: res.ok };
+}
+
+async function handleLineEvent(ev) {
+  if (!ev || !ev.replyToken) return;
+  const uid = ev.source && ev.source.userId ? String(ev.source.userId) : "";
+  if (isSellerUser(uid)) {
+    console.log("LINE webhook skip seller");
+    return;
+  }
+  let text;
+  if (ev.type === "follow") {
+    text = MSG_WELCOME;
+  } else if (ev.type === "message" && ev.message && ev.message.type === "text") {
+    text = autoReplyText(ev.message.text);
+  } else {
+    return;
+  }
+  const result = await replyLine(ev.replyToken, text);
+  console.log("LINE reply", ev.type, result.status);
+}
+
+async function handleLineWebhook(req, res) {
+  let raw;
+  try {
+    raw = await readRawBody(req, 256 * 1024);
+  } catch (err) {
+    const code = err.code === "too_large" ? 413 : 400;
+    return json(res, code, { ok: false, error: err.code || "invalid_body" });
+  }
+  const sig = String(req.headers["x-line-signature"] || "");
+  if (!verifyLineSignature(raw, sig)) {
+    return json(res, 401, { ok: false, error: "invalid_signature" });
+  }
+  let payload;
+  try {
+    payload = raw.length ? JSON.parse(raw.toString("utf8")) : {};
+  } catch (_) {
+    return json(res, 400, { ok: false, error: "invalid_json" });
+  }
+  // Verify first, then 200 immediately; replies are async and use the free reply API.
+  json(res, 200, { ok: true });
+  const events = payload && Array.isArray(payload.events) ? payload.events : [];
+  Promise.resolve()
+    .then(function () {
+      return events.reduce(function (p, ev) {
+        return p.then(function () {
+          return handleLineEvent(ev).catch(function () {
+            console.error("LINE webhook event error");
+          });
+        });
+      }, Promise.resolve());
+    })
+    .catch(function () {
+      console.error("LINE webhook processing error");
+    });
+}
+
 function safeJoinPublic(urlPath) {
   let decoded;
   try {
@@ -434,6 +581,21 @@ function createServer() {
     return json(res, 200, { ok: true });
   }
 
+  if (url.split("?")[0] === "/webhook/line") {
+    if (method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Methods": "POST",
+        "Access-Control-Allow-Headers": "Content-Type, X-Line-Signature",
+      });
+      return res.end();
+    }
+    if (method !== "POST") return json(res, 405, { ok: false, error: "method_not_allowed" });
+    return handleLineWebhook(req, res).catch((err) => {
+      console.error("LINE webhook handler error");
+      if (!res.headersSent) json(res, 500, { ok: false, error: "server_error" });
+    });
+  }
+
   if (url.split("?")[0] === "/api/order") {
     if (method === "OPTIONS") {
       res.writeHead(204, {
@@ -470,6 +632,11 @@ module.exports = {
   formatOrderText,
   parseItems,
   formatItemLine,
+  autoReplyText,
+  verifyLineSignature,
+  isSellerUser,
+  MSG_WELCOME,
+  MSG_DEFAULT,
   PLANS,
   SHIPPING_FEE,
   FREE_SHIPPING_AT,
