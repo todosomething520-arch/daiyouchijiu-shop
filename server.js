@@ -6,7 +6,9 @@
  *   環境變數（部署時務必用 Render env，不要寫進 Git）：
  *     LINE_CHANNEL_ACCESS_TOKEN, LINE_USER_ID（或 LINE_SELLER_USER_ID）,
  *     LINE_CHANNEL_SECRET（僅供 /webhook/line 驗簽，勿寫進 Git）
+ *     SHEET_WEBHOOK_URL, SHEET_SECRET（選用：訂單寫入 Google Sheet 並自動核對首購／折抵券）
  *     HOST=0.0.0.0  PORT 由平台注入
+ *   未設定 SHEET_* 時行為不變，訂單不會因為試算表失敗而失敗。
  *   本機未設環境變數時，可從 SECRETS_DIR 讀取。
  *   自動回覆走 Messaging API reply（免費），不是 push。
  */
@@ -162,6 +164,17 @@ if (!LINE_CHANNEL_SECRET) {
   console.error("Missing LINE_CHANNEL_SECRET; /webhook/line will reject requests.");
 }
 
+function getSheetConfig() {
+  const url = (process.env.SHEET_WEBHOOK_URL || readSecret("SHEET_WEBHOOK_URL", "sheet_webhook_url") || "").trim();
+  const secret = (process.env.SHEET_SECRET || readSecret("SHEET_SECRET", "sheet_secret") || "").trim();
+  return { url: url, secret: secret };
+}
+
+function isSheetConfigured(cfg) {
+  cfg = cfg || getSheetConfig();
+  return !!(cfg.url && cfg.secret);
+}
+
 try {
   fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 } catch (err) {
@@ -187,9 +200,26 @@ function generateOrderNo() {
   return "DY" + stamp + "-" + rand;
 }
 
+const COUPON_STATUS_LINE = {
+  valid: "券有效✅",
+  used: "⚠️ 已使用過，請勿折抵",
+  phone_mismatch: "⚠️ 號碼不符，請勿折抵",
+  not_found: "⚠️ 查無此單，請勿折抵",
+  not_first: "⚠️ 非首購單，請勿折抵",
+};
+
+function formatCouponSheetLine(code, status) {
+  const label = COUPON_STATUS_LINE[status];
+  if (status === "valid") return "折抵券 " + code + " 券有效✅";
+  if (label) return "折抵券 " + code + " " + label;
+  return "折抵券 " + code + "（-NT$250，請核對是否為該客首購單且未使用過）";
+}
+
 function formatOrderText(order) {
   const c = order.customer;
   const lines = (order.items || []).map(formatItemLine);
+  const sheet = order.sheetResult;
+  const sheetOk = !!(sheet && sheet.ok && typeof sheet.isFirstPurchase === "boolean");
   const out = [
     "訂單編號：" + order.orderNo,
     "商品：" + order.product,
@@ -197,7 +227,11 @@ function formatOrderText(order) {
   ].concat(lines);
   out.push("商品小計：" + money(order.subtotal) + "（共 " + order.tabletTotal + " 錠）");
   if (order.discount) {
-    out.push("折抵券 " + order.couponCode + "（-NT$250，請核對是否為該客首購單且未使用過）");
+    if (sheetOk) {
+      out.push(formatCouponSheetLine(order.couponCode, sheet.couponStatus));
+    } else {
+      out.push("折抵券 " + order.couponCode + "（-NT$250，請核對是否為該客首購單且未使用過）");
+    }
   }
   out.push("運費：" + (order.shippingFee ? money(order.shippingFee) : "免運"));
   out.push("應付：" + money(order.total));
@@ -205,13 +239,115 @@ function formatOrderText(order) {
     out.push("使用心得：" + (order.couponFeedback || ""));
     out.push("刊登同意：" + (order.publishConsent ? "是" : "否"));
   }
-  out.push("若為首購→此單號即折抵券");
+  if (sheetOk) {
+    if (sheet.isFirstPurchase) {
+      out.push("首購✅ 已發 NT$250 折抵券（券號=本單號）");
+    } else {
+      out.push("非首購");
+    }
+    if (sheet.suspectedDuplicate) {
+      out.push("⚠️疑似同一人（姓名+門市相同）");
+    }
+  } else {
+    out.push("若為首購→此單號即折抵券");
+  }
   out.push("姓名：" + c.name);
   out.push("手機：" + c.phone);
   out.push("LINE ID：" + (c.lineId || "（未填）"));
   out.push("7-11門市：" + c.store);
   out.push("備註：" + (c.notes || "（無）"));
   return out.join("\n");
+}
+
+function itemsTextForSheet(order) {
+  return (order.items || []).map(formatItemLine).join("；");
+}
+
+function sheetOrderPayload(order) {
+  const c = order.customer || {};
+  return {
+    orderNo: order.orderNo,
+    createdAt: order.createdAt,
+    name: c.name,
+    phone: c.phone,
+    store: c.store,
+    items: order.items,
+    itemsText: itemsTextForSheet(order),
+    subtotal: order.subtotal,
+    shippingFee: order.shippingFee,
+    discount: order.discount || 0,
+    total: order.total,
+    couponCode: order.couponCode || "",
+    couponFeedback: order.couponFeedback || "",
+    publishConsent: order.publishConsent === true,
+    notes: c.notes || "",
+  };
+}
+
+async function postJsonFollowRedirects(url, bodyObj, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(function () {
+    controller.abort();
+  }, timeoutMs);
+  try {
+    let current = url;
+    const payload = JSON.stringify(bodyObj);
+    for (let hop = 0; hop < 6; hop++) {
+      const res = await fetch(current, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: payload,
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        if (!loc) return { ok: false, error: "redirect_missing", http: res.status };
+        current = new URL(loc, current).href;
+        continue;
+      }
+      const text = await res.text();
+      if (!res.ok) return { ok: false, error: "http_error", http: res.status };
+      try {
+        const data = JSON.parse(text);
+        if (!data || data.ok === false) {
+          return { ok: false, error: (data && data.error) || "sheet_error", http: res.status };
+        }
+        return {
+          ok: true,
+          http: res.status,
+          isFirstPurchase: data.isFirstPurchase,
+          couponStatus: data.couponStatus == null ? "" : String(data.couponStatus),
+          suspectedDuplicate: !!data.suspectedDuplicate,
+        };
+      } catch (err) {
+        return { ok: false, error: "invalid_json", http: res.status };
+      }
+    }
+    return { ok: false, error: "too_many_redirects" };
+  } catch (err) {
+    const timedOut = !!(err && (err.name === "AbortError" || err.code === "ABORT_ERR"));
+    return { ok: false, error: timedOut ? "timeout" : "network" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callSheetCheckAndRecord(order, cfg) {
+  cfg = cfg || getSheetConfig();
+  if (!isSheetConfigured(cfg)) {
+    return { ok: false, skipped: true };
+  }
+  try {
+    return await postJsonFollowRedirects(
+      cfg.url,
+      { secret: cfg.secret, action: "checkAndRecord", order: sheetOrderPayload(order) },
+      8000
+    );
+  } catch (err) {
+    console.error("sheet webhook failed");
+    return { ok: false, error: err && err.name === "AbortError" ? "timeout" : "network" };
+  }
 }
 
 function parseItems(body) {
@@ -416,6 +552,12 @@ async function handleOrder(req, res) {
   }
 
   const order = result.order;
+  const sheetResult = await callSheetCheckAndRecord(order);
+  if (sheetResult && sheetResult.ok) {
+    order.sheetResult = sheetResult;
+  } else if (sheetResult && !sheetResult.skipped) {
+    console.error("sheet webhook unavailable; using manual-check text");
+  }
   const text = formatOrderText(order);
   let push;
   try {
@@ -696,6 +838,11 @@ module.exports = {
   MSG_PLANS,
   MSG_DEFAULT,
   parseCoupon,
+  callSheetCheckAndRecord,
+  postJsonFollowRedirects,
+  getSheetConfig,
+  isSheetConfigured,
+  formatCouponSheetLine,
   PLANS,
   SHIPPING_FEE,
   FREE_SHIPPING_AT,

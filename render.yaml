@@ -15,3 +15,7 @@ services:
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
+      - key: SHEET_WEBHOOK_URL
+        sync: false
+      - key: SHEET_SECRET
+        sync: false
