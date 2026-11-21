@@ -7,7 +7,7 @@
 /* ========== 可調整設定 ========== */
 const SHIPPING_FEE = 60; // 7-11 賣貨便運費（新台幣）；以後端重算為準
 const FREE_SHIPPING_AT = 3000; // 商品金額滿此金額免運
-const LINE_OA_URL = "https://lin.ee/OWiFfsv"; // 官方帳號加好友連結
+const LINE_OA_URL = "https://line.me/R/ti/p/@997baoaw"; // 官方帳號加好友連結
 const LINE_OA_ID = "@997baoaw"; // 官方帳號 ID（可搜尋）
 const ORDER_API = "/api/order";
 
