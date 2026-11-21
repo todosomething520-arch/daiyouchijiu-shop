@@ -413,10 +413,13 @@ function serveStatic(req, res) {
       res.end(err.code === "ENOENT" ? "Not found" : "Error");
       return;
     }
+    var cacheControl = "public, max-age=3600";
+    if (ext === ".html") cacheControl = "no-cache";
+    else if (ext === ".js" || ext === ".css") cacheControl = "public, max-age=120, must-revalidate";
     res.writeHead(200, {
       "Content-Type": mime,
       "X-Content-Type-Options": "nosniff",
-      "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=3600",
+      "Cache-Control": cacheControl,
     });
     res.end(data);
   });

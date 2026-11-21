@@ -62,10 +62,10 @@ function defaultQty(plan) {
 }
 
 function clampQtyFor(plan, n) {
-  const { min, max } = qtyLimits(plan);
+  const limits = qtyLimits(plan);
   const q = Math.floor(Number(n));
-  if (!Number.isFinite(q)) return min;
-  return Math.min(max, Math.max(min, q));
+  if (!Number.isFinite(q)) return limits.min;
+  return Math.min(limits.max, Math.max(limits.min, q));
 }
 
 function buildLine(p, qty) {
@@ -201,14 +201,14 @@ function addToCart(planId, qty) {
   const plan = planById(planId);
   if (!plan) return;
   const add = clampQtyFor(plan, qty);
-  const { max } = qtyLimits(plan);
+  const maxQty = qtyLimits(plan).max;
   const current = state.cart[planId] || 0;
   const unit = isBulk(plan) ? "錠" : "組";
-  if (current >= max) {
-    showToast(`${isBulk(plan) ? "批量" : plan.name} 最多可買 ${max} ${unit}`);
+  if (current >= maxQty) {
+    showToast(`${isBulk(plan) ? "批量" : plan.name} 最多可買 ${maxQty} ${unit}`);
     return;
   }
-  const next = Math.min(max, current + add);
+  const next = Math.min(maxQty, current + add);
   state.cart[planId] = next;
   updateTotals();
   const card = document.querySelector(`.plan-card[data-plan="${planId}"]`);
@@ -236,6 +236,7 @@ function removeLine(planId) {
 
 function setupCartEvents() {
   const grid = $("#pricing-grid");
+  if (!grid) return;
   grid.addEventListener("click", (e) => {
     const card = e.target.closest(".plan-card");
     if (!card) return;
@@ -263,7 +264,9 @@ function setupCartEvents() {
     if (isBulk(plan)) updateBulkPreview(card, input.value);
   });
 
-  $("#cart-lines").addEventListener("click", (e) => {
+  const cartLines = $("#cart-lines");
+  if (!cartLines) return;
+  cartLines.addEventListener("click", (e) => {
     const line = e.target.closest(".cart-line");
     if (!line) return;
     const planId = line.dataset.plan;
@@ -277,7 +280,7 @@ function setupCartEvents() {
       setLineQty(planId, current + Number(deltaBtn.dataset.cartDelta));
     }
   });
-  $("#cart-lines").addEventListener("change", (e) => {
+  cartLines.addEventListener("change", (e) => {
     const input = e.target.closest("[data-cart-qty]");
     if (!input) return;
     setLineQty(input.dataset.cartQty, input.value);
@@ -337,21 +340,27 @@ function updateTotals() {
   renderCartLines(t.items);
 
   const pillLabel = t.items.length ? `商品小計（共 ${t.tabletTotal} 錠）` : "商品小計";
-  $("#live-plan-label").textContent = pillLabel;
-  $("#live-subtotal").textContent = money(t.subtotal);
-  $("#live-shipping").textContent = t.shipping === 0 && t.subtotal > 0 ? "免運" : money(t.shipping || SHIPPING_FEE);
-  $("#live-total").textContent = money(t.total);
+  const liveLabel = $("#live-plan-label");
+  const liveSub = $("#live-subtotal");
+  const liveShip = $("#live-shipping");
+  const liveTotal = $("#live-total");
+  if (liveLabel) liveLabel.textContent = pillLabel;
+  if (liveSub) liveSub.textContent = money(t.subtotal);
+  if (liveShip) liveShip.textContent = t.shipping === 0 && t.subtotal > 0 ? "免運" : money(t.shipping || SHIPPING_FEE);
+  if (liveTotal) liveTotal.textContent = money(t.total);
 
   const fill = $("#ship-bar-fill");
   const text = $("#ship-progress-text");
   const pct = Math.min(100, Math.round((t.subtotal / FREE_SHIPPING_AT) * 100));
-  fill.style.width = pct + "%";
-  if (!t.items.length) {
-    text.textContent = `商品金額滿 ${money(FREE_SHIPPING_AT)} 免運。`;
-  } else if (t.free) {
-    text.textContent = `已達免運門檻（滿 ${money(FREE_SHIPPING_AT)}）。`;
-  } else {
-    text.textContent = `再購 ${money(t.remain)} 即可免運（門檻 ${money(FREE_SHIPPING_AT)}）。`;
+  if (fill) fill.style.width = pct + "%";
+  if (text) {
+    if (!t.items.length) {
+      text.textContent = `商品金額滿 ${money(FREE_SHIPPING_AT)} 免運。`;
+    } else if (t.free) {
+      text.textContent = `已達免運門檻（滿 ${money(FREE_SHIPPING_AT)}）。`;
+    } else {
+      text.textContent = `再購 ${money(t.remain)} 即可免運（門檻 ${money(FREE_SHIPPING_AT)}）。`;
+    }
   }
 
   const go = $("#go-checkout");
@@ -370,18 +379,20 @@ function updateTotals() {
   });
 
   const display = $("#selected-plan-display");
-  if (t.items.length) {
-    display.classList.add("filled");
-    display.innerHTML = t.items
-      .map((it) => lineLabel(it))
-      .join("<br>") + `<br>小計 ${money(t.subtotal)}　運費 ${t.shipping ? money(t.shipping) : "免運"}　合計 ${money(t.total)}`;
-  } else {
-    display.classList.remove("filled");
-    display.textContent = "請先將方案加入購物車";
+  if (display) {
+    if (t.items.length) {
+      display.classList.add("filled");
+      display.innerHTML = t.items
+        .map((it) => lineLabel(it))
+        .join("<br>") + `<br>小計 ${money(t.subtotal)}　運費 ${t.shipping ? money(t.shipping) : "免運"}　合計 ${money(t.total)}`;
+    } else {
+      display.classList.remove("filled");
+      display.textContent = "請先將方案加入購物車";
+    }
   }
 
   const mini = $("#form-summary");
-  mini.innerHTML = t.items.length ? cartSummaryHtml(t) : "";
+  if (mini) mini.innerHTML = t.items.length ? cartSummaryHtml(t) : "";
 }
 
 /* ========== 表單 ========== */
@@ -462,7 +473,9 @@ function buildOrder() {
   };
 }
 
-function orderSummaryHtml(order, { thankYou = false } = {}) {
+function orderSummaryHtml(order, opts) {
+  opts = opts || {};
+  const thankYou = !!opts.thankYou;
   const c = order.customer;
   const itemRows = (order.items || []).map((it) =>
     it.bulk
@@ -485,8 +498,12 @@ function orderSummaryHtml(order, { thankYou = false } = {}) {
   ];
   const body = rows
     .map(
-      ([k, val, total]) =>
-        `<div class="confirm-row${total ? " total" : ""}"><span>${k}</span><span>${val}</span></div>`
+      function (row) {
+        const k = row[0];
+        const val = row[1];
+        const total = row[2];
+        return `<div class="confirm-row${total ? " total" : ""}"><span>${k}</span><span>${val}</span></div>`;
+      }
     )
     .join("");
   const note = thankYou
@@ -629,7 +646,10 @@ async function finalizeOrder(order) {
   }
 }
 
-function showSuccess(order, { notified = false, error = "" } = {}) {
+function showSuccess(order, opts) {
+  opts = opts || {};
+  const notified = !!opts.notified;
+  const error = opts.error || "";
   state.lastOrder = order;
   closeConfirm();
   $("#success-body").innerHTML = orderSummaryHtml(order, { thankYou: true });
@@ -703,21 +723,45 @@ function setupCopyLineId() {
 }
 
 function setupAgeGate() {
+  // Backup only. The inline script in index.html is the primary handler
+  // so the gate still works if later init steps throw or app.js is stale.
+  if (typeof window.__dyAgeOk === "function" && window.__dyAgeOk()) {
+    if (typeof window.__dyEnterAge === "function") window.__dyEnterAge();
+    return;
+  }
   const gate = $("#age-gate");
+  if (!gate || gate.hidden) return;
   document.body.classList.add("age-open");
-  $("#age-enter").addEventListener("click", () => {
+  function enter(ev) {
+    if (typeof window.__dyEnterAge === "function") {
+      window.__dyEnterAge(ev);
+      return;
+    }
+    if (ev && ev.preventDefault) ev.preventDefault();
     gate.hidden = true;
+    gate.style.display = "none";
     document.body.classList.remove("age-open");
-  });
-  $("#age-leave").addEventListener("click", () => {
-    document.body.innerHTML =
-      '<main style="min-height:100vh;display:grid;place-items:center;background:#050b18;color:#c9a24a;font-family:sans-serif;text-align:center;padding:2rem;"><p>你已離開本頁。本產品僅供 18 歲以上成年人瀏覽與購買。</p></main>';
-  });
+  }
+  const enterBtn = $("#age-enter");
+  const leaveBtn = $("#age-leave");
+  if (enterBtn && enterBtn.getAttribute("data-age-bound") !== "1") {
+    enterBtn.setAttribute("data-age-bound", "1");
+    enterBtn.addEventListener("click", enter);
+    enterBtn.addEventListener("touchend", enter);
+  }
+  if (leaveBtn && leaveBtn.getAttribute("data-age-bound") !== "1") {
+    leaveBtn.setAttribute("data-age-bound", "1");
+    leaveBtn.addEventListener("click", function () {
+      document.body.innerHTML =
+        '<main style="min-height:100vh;display:grid;place-items:center;background:#050b18;color:#c9a24a;font-family:sans-serif;text-align:center;padding:2rem;"><p>你已離開本頁。本產品僅供 18 歲以上成年人瀏覽與購買。</p></main>';
+    });
+  }
 }
 
 function setupStickyBar() {
   const bar = $("#bottom-bar");
   const footer = document.querySelector(".footer");
+  if (!bar || !footer) return;
   const onScroll = () => {
     if (document.body.classList.contains("success-open") || document.body.classList.contains("age-open")) {
       bar.classList.add("hidden");
@@ -731,14 +775,25 @@ function setupStickyBar() {
 }
 
 /* ========== 啟動 ========== */
-function init() {
-  renderPlans();
-  setupCartEvents();
-  updateTotals();
-  setupAgeGate();
-  setupCopyLineId();
-  setupStickyBar();
+function runInitStep(name, fn) {
+  try {
+    fn();
+  } catch (err) {
+    if (typeof console !== "undefined" && console.error) {
+      console.error("[init] " + name, err);
+    }
+  }
+}
 
+function init() {
+  runInitStep("setupAgeGate", setupAgeGate);
+  runInitStep("renderPlans", renderPlans);
+  runInitStep("setupCartEvents", setupCartEvents);
+  runInitStep("updateTotals", updateTotals);
+  runInitStep("setupCopyLineId", setupCopyLineId);
+  runInitStep("setupStickyBar", setupStickyBar);
+
+  runInitStep("bindForm", function () {
   $("#phone").addEventListener("blur", () => {
     const ok = isTaiwanMobile($("#phone").value) || !$("#phone").value.trim();
     $("#phone").classList.toggle("invalid", !ok && $("#phone").value.trim());
@@ -790,6 +845,21 @@ function init() {
   $("#confirm-modal").addEventListener("click", (e) => {
     if (e.target.id === "confirm-modal") closeConfirm();
   });
+  });
 }
 
-document.addEventListener("DOMContentLoaded", init);
+function boot() {
+  try {
+    init();
+  } catch (err) {
+    if (typeof console !== "undefined" && console.error) {
+      console.error("[init]", err);
+    }
+  }
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}

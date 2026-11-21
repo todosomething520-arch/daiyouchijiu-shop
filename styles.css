@@ -687,6 +687,23 @@ textarea.form-input { resize: vertical; min-height: 5rem; }
   gap: 0.6rem;
   margin-top: 1.2rem;
 }
+.age-gate-actions .btn {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(232, 200, 114, 0.35);
+  cursor: pointer;
+  position: relative;
+  z-index: 2;
+}
+.age-gate-fallback {
+  margin: 1.1rem 0 0.7rem;
+  color: var(--text-3);
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+.age-gate-card .age-gate-line {
+  width: 100%;
+  touch-action: manipulation;
+}
 
 .success-screen { z-index: 90; align-items: start; padding: 2rem 0 4rem; }
 .success-card { text-align: left; width: min(40rem, calc(100% - 2rem)); margin: 0 auto; }
