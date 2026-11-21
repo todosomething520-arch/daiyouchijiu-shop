@@ -414,6 +414,8 @@ const MSG_ORDER = [
 
 const MSG_SHIP = "目前提供 7-11 賣貨便寄送，運費 NT$60；商品金額滿 NT$3,000 免運。";
 
+const MSG_CS = "收到！請直接留下您的問題，客服 24 小時會盡快親自回覆您。";
+
 const MSG_DEFAULT = "已收到您的訊息，客服 24 小時服務，會盡快回覆您！想立即下單請點：" + SHOP_URL;
 
 function autoReplyText(text) {
@@ -421,6 +423,7 @@ function autoReplyText(text) {
   if (/運費|寄送|免運/.test(t)) return MSG_SHIP;
   if (/下單|訂購|購買|怎麼買/.test(t)) return MSG_ORDER;
   if (/價格|方案|多少錢/.test(t)) return MSG_PLANS;
+  if (/客服|真人/.test(t)) return MSG_CS;
   return MSG_DEFAULT;
 }
 
