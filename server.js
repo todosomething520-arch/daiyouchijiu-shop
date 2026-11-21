@@ -31,7 +31,10 @@ const PLANS = Object.freeze({
   p3: { id: "p3", name: "3錠組", tablets: 3, price: 700 },
   p5: { id: "p5", name: "5錠組", tablets: 5, price: 1100 },
   p10: { id: "p10", name: "10錠組", tablets: 10, price: 2000 },
+  p15: { id: "p15", name: "15錠組", tablets: 15, price: 3000 },
 });
+
+const PLAN_ORDER = Object.freeze(["p1", "p3", "p5", "p10", "p15"]);
 
 const LIMITS = {
   name: [2, 40],
@@ -39,6 +42,7 @@ const LIMITS = {
   store: [2, 80],
   notes: [0, 200],
   qty: [1, 20],
+  maxLines: 5,
 };
 
 const MIME = {
@@ -106,11 +110,15 @@ function generateOrderNo() {
 
 function formatOrderText(order) {
   const c = order.customer;
+  const lines = (order.items || []).map(
+    (it) => `・${it.planName} × ${it.quantity} 組（共 ${it.tabletTotal} 錠）　${money(it.subtotal)}`
+  );
   return [
     `訂單編號：${order.orderNo}`,
-    `方案：${order.product}／${order.planName}`,
-    `組數：${order.quantity} 組（共 ${order.tabletTotal} 錠）`,
-    `金額：${money(order.subtotal)}`,
+    `商品：${order.product}`,
+    "明細：",
+    ...lines,
+    `商品小計：${money(order.subtotal)}（共 ${order.tabletTotal} 錠）`,
     `運費：${order.shippingFee ? money(order.shippingFee) : "免運"}`,
     `應付：${money(order.total)}`,
     `姓名：${c.name}`,
@@ -119,6 +127,55 @@ function formatOrderText(order) {
     `7-11門市：${c.store}`,
     `備註：${c.notes || "（無）"}`,
   ].join("\n");
+}
+
+function parseItems(body) {
+  let raw = body.items;
+  if (!Array.isArray(raw)) {
+    if (body.planId) {
+      raw = [{ plan: body.planId, qty: body.quantity }];
+    } else {
+      return { error: "invalid_items" };
+    }
+  }
+  if (raw.length < 1 || raw.length > LIMITS.maxLines) {
+    return { error: "invalid_items" };
+  }
+
+  const merged = new Map();
+  for (const row of raw) {
+    if (!row || typeof row !== "object") return { error: "invalid_items" };
+    const planId = String(row.plan || row.planId || "").trim();
+    const plan = PLANS[planId];
+    if (!plan) return { error: "invalid_plan" };
+    const qty = Number(row.qty != null ? row.qty : row.quantity);
+    if (!Number.isInteger(qty) || qty < LIMITS.qty[0] || qty > LIMITS.qty[1]) {
+      return { error: "invalid_quantity" };
+    }
+    const prev = merged.get(planId) || 0;
+    const next = prev + qty;
+    if (next > LIMITS.qty[1]) return { error: "invalid_quantity" };
+    merged.set(planId, next);
+  }
+
+  if (merged.size < 1 || merged.size > LIMITS.maxLines) {
+    return { error: "invalid_items" };
+  }
+
+  const items = PLAN_ORDER.filter((id) => merged.has(id)).map((id) => {
+    const plan = PLANS[id];
+    const quantity = merged.get(id);
+    return {
+      planId: plan.id,
+      planName: plan.name,
+      tabletsEach: plan.tablets,
+      quantity,
+      tabletTotal: plan.tablets * quantity,
+      unitPrice: plan.price,
+      subtotal: plan.price * quantity,
+    };
+  });
+  return { items };
 }
 
 function validateAndBuild(body) {
@@ -130,13 +187,9 @@ function validateAndBuild(body) {
     return { error: "rejected" };
   }
 
-  const plan = PLANS[String(body.planId || "")];
-  if (!plan) return { error: "invalid_plan" };
-
-  const quantity = Number(body.quantity);
-  if (!Number.isInteger(quantity) || quantity < LIMITS.qty[0] || quantity > LIMITS.qty[1]) {
-    return { error: "invalid_quantity" };
-  }
+  const parsed = parseItems(body);
+  if (parsed.error) return parsed;
+  const items = parsed.items;
 
   const name = clampText(body.name);
   const phone = normalizePhone(body.phone);
@@ -150,7 +203,8 @@ function validateAndBuild(body) {
   if (store.length < LIMITS.store[0] || store.length > LIMITS.store[1]) return { error: "invalid_store" };
   if (notes.length > LIMITS.notes[1]) return { error: "invalid_notes" };
 
-  const subtotal = plan.price * quantity;
+  const subtotal = items.reduce((s, it) => s + it.subtotal, 0);
+  const tabletTotal = items.reduce((s, it) => s + it.tabletTotal, 0);
   const shippingFee = subtotal >= FREE_SHIPPING_AT ? 0 : SHIPPING_FEE;
   const total = subtotal + shippingFee;
   const orderNo = generateOrderNo();
@@ -159,12 +213,8 @@ function validateAndBuild(body) {
     orderNo,
     createdAt: new Date().toISOString(),
     product: PRODUCT,
-    planId: plan.id,
-    planName: plan.name,
-    tabletsEach: plan.tablets,
-    quantity,
-    tabletTotal: plan.tablets * quantity,
-    unitPrice: plan.price,
+    items,
+    tabletTotal,
     subtotal,
     shippingFee,
     shippingMethod: "7-11 賣貨便",
@@ -350,7 +400,8 @@ function serveStatic(req, res) {
   });
 }
 
-const server = http.createServer((req, res) => {
+function createServer() {
+  return http.createServer((req, res) => {
   const url = req.url || "/";
   const method = req.method || "GET";
 
@@ -378,11 +429,25 @@ const server = http.createServer((req, res) => {
     return res.end("Method not allowed");
   }
   return serveStatic(req, res);
-});
+  });
+}
 
-server.listen(PORT, HOST, () => {
-  console.log("listening on " + HOST + ":" + PORT);
-});
+if (require.main === module) {
+  const server = createServer();
+  server.listen(PORT, HOST, () => {
+    console.log("listening on " + HOST + ":" + PORT);
+  });
+}
+
+module.exports = {
+  createServer,
+  validateAndBuild,
+  formatOrderText,
+  parseItems,
+  PLANS,
+  SHIPPING_FEE,
+  FREE_SHIPPING_AT,
+};
 
 process.on("uncaughtException", (err) => {
   console.error("uncaughtException", err && err.message);
