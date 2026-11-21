@@ -644,6 +644,7 @@ body.success-open #site-root { visibility: hidden; pointer-events: none; }
   .hero-trust { justify-content: flex-start; }
   .hero-points, .hero-copy .badge { justify-content: flex-start; }
   .hero-actions { justify-content: flex-start; }
+  .hero-copy .line-cta { align-items: flex-start; }
   .line-float { bottom: 1.5rem; right: 1.4rem; }
   .hero-copy .badge { display: inline-block; }
   .card-grid.two, .card-grid.three, .steps { grid-template-columns: repeat(3, 1fr); }
@@ -808,3 +809,41 @@ body.success-open .line-float { display: none; }
   font-size: 0.92rem;
 }
 .success-alert[hidden] { display: none; }
+
+.line-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+}
+.line-id-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  color: var(--text-2);
+  font-size: 0.88rem;
+}
+.line-id-row strong {
+  color: var(--gold-3);
+  font-weight: 700;
+}
+.btn-copy-id {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.55rem;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--gold);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.btn-copy-id:hover { background: rgba(232, 200, 114, 0.1); }
+.success-line-id { margin: 0 0 1rem; }
+.footer .line-cta { margin: 0 auto 1.1rem; }
+.faq-contact .line-cta .btn-line { width: min(100%, 16rem); }

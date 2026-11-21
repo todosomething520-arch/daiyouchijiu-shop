@@ -8,6 +8,7 @@
 const SHIPPING_FEE = 60; // 7-11 賣貨便運費（新台幣）；以後端重算為準
 const FREE_SHIPPING_AT = 3000; // 商品金額滿此金額免運
 const LINE_OA_URL = "https://lin.ee/OWiFfsv"; // 官方帳號加好友連結
+const LINE_OA_ID = "@997baoaw"; // 官方帳號 ID（可搜尋）
 const ORDER_API = "/api/order";
 
 const PLANS = [
@@ -454,6 +455,25 @@ function showSuccess(order, { notified = false, error = "" } = {}) {
 }
 
 /* ========== 年齡門檻、底部列 ========== */
+
+function setupCopyLineId() {
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-copy-line-id]");
+    if (!btn) return;
+    e.preventDefault();
+    const id = btn.getAttribute("data-copy-line-id") || LINE_OA_ID;
+    const ok = await copyText(id);
+    showToast(ok ? "已複製 LINE ID：" + id : "請手動複製 LINE ID：" + id);
+    if (ok) {
+      const prev = btn.textContent;
+      btn.textContent = "已複製";
+      setTimeout(() => {
+        btn.textContent = prev || "複製";
+      }, 1600);
+    }
+  });
+}
+
 function setupAgeGate() {
   const gate = $("#age-gate");
   document.body.classList.add("age-open");
@@ -487,6 +507,7 @@ function init() {
   renderPlans();
   updateTotals();
   setupAgeGate();
+  setupCopyLineId();
   setupStickyBar();
 
   $("#qty-minus").addEventListener("click", () => setQty(state.qty - 1));
